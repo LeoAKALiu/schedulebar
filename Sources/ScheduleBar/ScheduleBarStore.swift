@@ -9,15 +9,18 @@ public final class ScheduleBarStore {
     private let database: SQLiteDatabase
     private let now: @Sendable () -> Date
     private let notifier: DirectoryNotifier
+    private let reminderNotifier: ReminderNotifier
 
     public init(
         storeURL: URL,
         now: @escaping @Sendable () -> Date = { Date() },
-        notifier: DirectoryNotifier = SilentDirectoryNotifier()
+        notifier: DirectoryNotifier = SilentDirectoryNotifier(),
+        reminderNotifier: ReminderNotifier = SilentReminderNotifier()
     ) throws {
         self.storeURL = storeURL
         self.now = now
         self.notifier = notifier
+        self.reminderNotifier = reminderNotifier
         database = try SQLiteDatabase(url: storeURL)
     }
 
@@ -57,6 +60,9 @@ public final class ScheduleBarStore {
         case .addTag(let taskID, let tag):
             try requireHuman(authority)
             return try addTag(taskID, tag)
+        case .setReminders(let taskID, let fires):
+            try requireHuman(authority)
+            return try setReminders(taskID, fires)
         }
     }
 
@@ -91,6 +97,17 @@ public final class ScheduleBarStore {
         defer { database.lock.unlock() }
         let tasks = try loadTasks(lifecycle: "active", projectID: projectID)
         let candidates = try loadCandidates(projectID: projectID)
+        var overdue: [TaskSummary] = []
+        var today: [TaskSummary] = []
+        var nextSevenDays: [TaskSummary] = []
+        for task in tasks {
+            switch DateParser.menuBucket(for: task, now: now()) {
+            case .overdue: overdue.append(task)
+            case .today: today.append(task)
+            case .nextSevenDays: nextSevenDays.append(task)
+            case nil: break
+            }
+        }
         return ObservableState(
             tasks: tasks,
             candidates: candidates,
@@ -98,8 +115,57 @@ public final class ScheduleBarStore {
             trash: try loadTasks(lifecycle: "trashed", projectID: projectID),
             history: try loadHistory(),
             projects: try loadProjects(),
-            pendingDirectories: try loadPendingDirectories()
+            pendingDirectories: try loadPendingDirectories(),
+            overdue: overdue,
+            today: today,
+            nextSevenDays: nextSevenDays
         )
+    }
+
+    public func reminders(for taskID: UUID) throws -> [Reminder] {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        return try loadReminders(for: taskID)
+    }
+
+    public func processDueReminders() -> Int {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        do {
+            let stmt = try database.prepare(
+                """
+                SELECT r.id, r.fire_at, t.title
+                FROM reminders r
+                JOIN tasks t ON t.id = r.task_id
+                WHERE r.fired = 0 AND t.lifecycle = 'active'
+                ORDER BY r.fire_at ASC;
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            let formatter = ISO8601DateFormatter()
+            let current = now()
+            var due: [(id: String, fireAt: Date, title: String)] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let id = database.column(stmt, 0),
+                      let fireText = database.column(stmt, 1),
+                      let fireAt = formatter.date(from: fireText),
+                      let title = database.column(stmt, 2),
+                      fireAt <= current
+                else { continue }
+                due.append((id, fireAt, title))
+            }
+            for item in due {
+                reminderNotifier.notifyReminder(title: item.title, fireAt: item.fireAt)
+                let mark = try database.prepare("UPDATE reminders SET fired = 1, fired_at = ? WHERE id = ?;")
+                defer { sqlite3_finalize(mark) }
+                database.bind(mark, 1, iso(current))
+                database.bind(mark, 2, item.id)
+                guard sqlite3_step(mark) == SQLITE_DONE else { continue }
+            }
+            return due.count
+        } catch {
+            return 0
+        }
     }
 
     public func sourceEvidence(for taskID: UUID) throws -> SourceEvidence? {
@@ -153,8 +219,12 @@ public final class ScheduleBarStore {
             let event = try decode(payload)
             try discoverDirectory(event.workingDirectory)
             let mappedProject = try projectID(forDirectory: event.workingDirectory)
+            let parsedDate = DateParser.parse(phrase: event.datePhrase, kind: event.dateKind, at: event.messageTime)
             var classified = CaptureClassifier.outcome(for: event)
             if classified == .recorded, mappedProject == nil {
+                classified = .candidate
+            }
+            if classified == .recorded, parsedDate?.isVague == true {
                 classified = .candidate
             }
             var taskID: UUID?
@@ -168,6 +238,9 @@ public final class ScheduleBarStore {
                     projectID: mappedProject
                 )
                 taskID = created.taskID
+                if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
+                    try attachDate(parsedDate, to: createdID)
+                }
                 try insertEvidence(taskID: created.taskID, event: event)
                 try appendHistory(
                     summary: "Captured: \(event.title)",
@@ -341,6 +414,7 @@ public final class ScheduleBarStore {
                   let id = UUID(uuidString: idText),
                   let title = database.column(stmt, 1)
             else { continue }
+            let dates = try loadDates(for: id)
             tasks.append(
                 TaskSummary(
                     id: id,
@@ -348,7 +422,14 @@ public final class ScheduleBarStore {
                     notes: database.column(stmt, 2),
                     localPath: database.column(stmt, 3),
                     projectID: database.column(stmt, 4).flatMap(UUID.init(uuidString:)),
-                    tags: try loadTags(for: id)
+                    tags: try loadTags(for: id),
+                    datePhrase: dates.phrase,
+                    datePrecision: dates.precision,
+                    hardDeadline: dates.hardDeadline,
+                    plannedAt: dates.plannedAt,
+                    targetDate: dates.targetDate,
+                    followUpAt: dates.followUpAt,
+                    isOverdue: dates.isOverdue
                 )
             )
         }
@@ -420,6 +501,9 @@ public final class ScheduleBarStore {
         database.bind(check, 1, id.uuidString)
         guard sqlite3_step(check) == SQLITE_ROW else { throw ScheduleBarError.notFound }
         try database.exec("DELETE FROM source_evidence WHERE task_id = '\(id.uuidString)';")
+        try database.exec("DELETE FROM task_dates WHERE task_id = '\(id.uuidString)';")
+        try database.exec("DELETE FROM reminders WHERE task_id = '\(id.uuidString)';")
+        try database.exec("DELETE FROM task_tags WHERE task_id = '\(id.uuidString)';")
         try database.exec("DELETE FROM tasks WHERE id = '\(id.uuidString)';")
         try appendHistory(summary: "Permanently deleted", automatic: false, action: "delete", targetID: id, table: "tasks")
         return Receipt(outcome: .recorded, taskID: id, summaryLine: "Permanently deleted")
@@ -656,6 +740,139 @@ public final class ScheduleBarStore {
             }
         }
         return items
+    }
+
+    private func attachDate(_ parsed: ParsedDate, to taskID: UUID) throws {
+        let stmt = try database.prepare(
+            """
+            INSERT INTO task_dates (task_id, kind, phrase, anchor_at, instant, precision, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id, kind) DO UPDATE SET
+                phrase = excluded.phrase,
+                anchor_at = excluded.anchor_at,
+                instant = excluded.instant,
+                precision = excluded.precision,
+                status = excluded.status;
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        database.bind(stmt, 2, parsed.kind.rawValue)
+        database.bind(stmt, 3, parsed.phrase)
+        database.bind(stmt, 4, iso(parsed.anchor))
+        database.bind(stmt, 5, parsed.instant.map(iso))
+        database.bind(stmt, 6, parsed.precision.rawValue)
+        database.bind(stmt, 7, parsed.status.rawValue)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw ScheduleBarError.storeUnavailable
+        }
+        if parsed.kind == .hardDeadline, parsed.precision == .allDay, let instant = parsed.instant {
+            try replaceReminders(taskID, DateParser.defaultAllDayHardDeadlineReminders(deadline: instant))
+        }
+    }
+
+    private func setReminders(_ taskID: UUID, _ fires: [Date]) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let check = try database.prepare("SELECT id FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(check) }
+        database.bind(check, 1, taskID.uuidString)
+        guard sqlite3_step(check) == SQLITE_ROW else { throw ScheduleBarError.notFound }
+        try replaceReminders(taskID, fires)
+        try appendHistory(summary: "Updated reminders", automatic: false, action: "set_reminders", targetID: taskID, table: "reminders")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Updated reminders")
+    }
+
+    private func replaceReminders(_ taskID: UUID, _ fires: [Date]) throws {
+        let clear = try database.prepare("DELETE FROM reminders WHERE task_id = ?;")
+        defer { sqlite3_finalize(clear) }
+        database.bind(clear, 1, taskID.uuidString)
+        guard sqlite3_step(clear) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        for fireAt in fires {
+            let stmt = try database.prepare(
+                "INSERT INTO reminders (id, task_id, fire_at, fired, fired_at) VALUES (?, ?, ?, 0, NULL);"
+            )
+            defer { sqlite3_finalize(stmt) }
+            database.bind(stmt, 1, UUID().uuidString)
+            database.bind(stmt, 2, taskID.uuidString)
+            database.bind(stmt, 3, iso(fireAt))
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        }
+    }
+
+    private func loadReminders(for taskID: UUID) throws -> [Reminder] {
+        let stmt = try database.prepare(
+            "SELECT id, fire_at FROM reminders WHERE task_id = ? ORDER BY fire_at ASC;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        let formatter = ISO8601DateFormatter()
+        var items: [Reminder] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let fireText = database.column(stmt, 1),
+                  let fireAt = formatter.date(from: fireText)
+            else { continue }
+            items.append(Reminder(id: id, fireAt: fireAt))
+        }
+        return items
+    }
+
+    private func loadDates(for taskID: UUID) throws -> (
+        phrase: String?,
+        precision: DatePrecision?,
+        hardDeadline: Date?,
+        plannedAt: Date?,
+        targetDate: Date?,
+        followUpAt: Date?,
+        isOverdue: Bool
+    ) {
+        let stmt = try database.prepare(
+            "SELECT kind, phrase, instant, precision FROM task_dates WHERE task_id = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        let formatter = ISO8601DateFormatter()
+        var phrase: String?
+        var precision: DatePrecision?
+        var hardDeadline: Date?
+        var plannedAt: Date?
+        var targetDate: Date?
+        var followUpAt: Date?
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let kind = database.column(stmt, 0).flatMap(DateKind.init(rawValue:))
+            let rowPhrase = database.column(stmt, 1)
+            let instant = database.column(stmt, 2).flatMap(formatter.date(from:))
+            let rowPrecision = database.column(stmt, 3).flatMap(DatePrecision.init(rawValue:))
+            switch kind {
+            case .hardDeadline:
+                hardDeadline = instant
+                phrase = rowPhrase ?? phrase
+                precision = rowPrecision ?? precision
+            case .target:
+                targetDate = instant
+                if phrase == nil { phrase = rowPhrase }
+                if precision == nil { precision = rowPrecision }
+            case .planned:
+                plannedAt = instant
+                if phrase == nil { phrase = rowPhrase }
+                if precision == nil { precision = rowPrecision }
+            case .followUp:
+                followUpAt = instant
+                if phrase == nil { phrase = rowPhrase }
+                if precision == nil { precision = rowPrecision }
+            case nil:
+                continue
+            }
+        }
+        let overdue: Bool
+        if let hardDeadline, let precision {
+            overdue = DateParser.isOverdue(hardDeadline: hardDeadline, precision: precision, now: now())
+        } else {
+            overdue = false
+        }
+        return (phrase, precision, hardDeadline, plannedAt, targetDate, followUpAt, overdue)
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

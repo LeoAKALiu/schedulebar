@@ -29,6 +29,9 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
     public var triggerPhrase: String
     public var excerpt: String
 
+    public var datePhrase: String?
+    public var dateKind: DateKind?
+
     public init(
         idempotencyKey: String,
         title: String,
@@ -38,7 +41,9 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         messageTime: Date,
         workingDirectory: String,
         triggerPhrase: String,
-        excerpt: String
+        excerpt: String,
+        datePhrase: String? = nil,
+        dateKind: DateKind? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.title = title
@@ -49,7 +54,23 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         self.workingDirectory = workingDirectory
         self.triggerPhrase = String(triggerPhrase.prefix(200))
         self.excerpt = String(excerpt.prefix(280))
+        let phrase = datePhrase?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.datePhrase = (phrase?.isEmpty == false) ? phrase : nil
+        self.dateKind = dateKind
     }
+}
+
+public enum DateKind: String, Codable, Equatable, Sendable {
+    case planned
+    case target
+    case hardDeadline
+    case followUp
+}
+
+public enum DatePrecision: String, Codable, Equatable, Sendable {
+    case allDay
+    case dateTime
+    case vague
 }
 
 public enum InputEvent: Equatable, Sendable {
@@ -64,6 +85,7 @@ public enum InputEvent: Equatable, Sendable {
     case undoLastAutomaticChange
     case resolveDirectory(String, DirectoryDecision)
     case addTag(UUID, String)
+    case setReminders(UUID, [Date])
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -79,6 +101,25 @@ public protocol DirectoryNotifier: Sendable {
 public struct SilentDirectoryNotifier: DirectoryNotifier {
     public init() {}
     public func notifyUnknownDirectory(_ path: String) {}
+}
+
+public protocol ReminderNotifier: Sendable {
+    func notifyReminder(title: String, fireAt: Date)
+}
+
+public struct SilentReminderNotifier: ReminderNotifier {
+    public init() {}
+    public func notifyReminder(title: String, fireAt: Date) {}
+}
+
+public struct Reminder: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var fireAt: Date
+
+    public init(id: UUID, fireAt: Date) {
+        self.id = id
+        self.fireAt = fireAt
+    }
 }
 
 public enum Outcome: String, Equatable, Sendable {
@@ -122,6 +163,13 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var localPath: String?
     public var projectID: UUID?
     public var tags: [String]
+    public var datePhrase: String?
+    public var datePrecision: DatePrecision?
+    public var hardDeadline: Date?
+    public var plannedAt: Date?
+    public var targetDate: Date?
+    public var followUpAt: Date?
+    public var isOverdue: Bool
 
     public init(
         id: UUID,
@@ -129,7 +177,14 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         notes: String? = nil,
         localPath: String? = nil,
         projectID: UUID? = nil,
-        tags: [String] = []
+        tags: [String] = [],
+        datePhrase: String? = nil,
+        datePrecision: DatePrecision? = nil,
+        hardDeadline: Date? = nil,
+        plannedAt: Date? = nil,
+        targetDate: Date? = nil,
+        followUpAt: Date? = nil,
+        isOverdue: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -137,6 +192,13 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.localPath = localPath
         self.projectID = projectID
         self.tags = tags
+        self.datePhrase = datePhrase
+        self.datePrecision = datePrecision
+        self.hardDeadline = hardDeadline
+        self.plannedAt = plannedAt
+        self.targetDate = targetDate
+        self.followUpAt = followUpAt
+        self.isOverdue = isOverdue
     }
 }
 
@@ -189,10 +251,19 @@ public struct ObservableState: Equatable, Sendable {
     public var history: [HistoryEntry]
     public var projects: [ProjectSummary]
     public var pendingDirectories: [DirectoryDiscovery]
+    public var overdue: [TaskSummary]
+    public var today: [TaskSummary]
+    public var nextSevenDays: [TaskSummary]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
     public var candidateCount: Int { candidates.count }
+    public var todayCount: Int { today.count }
+    public var overdueCount: Int { overdue.count }
+    public var unscheduledMenuTasks: [TaskSummary] {
+        let grouped = Set(overdue.map(\.id) + today.map(\.id) + nextSevenDays.map(\.id))
+        return menuTasks.filter { !grouped.contains($0.id) }
+    }
 
     public init(
         tasks: [TaskSummary],
@@ -201,7 +272,10 @@ public struct ObservableState: Equatable, Sendable {
         trash: [TaskSummary] = [],
         history: [HistoryEntry] = [],
         projects: [ProjectSummary] = [],
-        pendingDirectories: [DirectoryDiscovery] = []
+        pendingDirectories: [DirectoryDiscovery] = [],
+        overdue: [TaskSummary] = [],
+        today: [TaskSummary] = [],
+        nextSevenDays: [TaskSummary] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -210,6 +284,9 @@ public struct ObservableState: Equatable, Sendable {
         self.history = history
         self.projects = projects
         self.pendingDirectories = pendingDirectories
+        self.overdue = overdue
+        self.today = today
+        self.nextSevenDays = nextSevenDays
     }
 }
 

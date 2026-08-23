@@ -12,14 +12,17 @@ final class AppSession: ObservableObject {
     init(store: ScheduleBarStore) throws {
         self.store = store
         _ = store.processInbox()
+        _ = store.processDueReminders()
         self.state = try store.observableState()
+        startReminderPolling()
     }
 
     convenience init() throws {
         try self.init(
             store: ScheduleBarStore(
                 storeURL: StoreLocation.fileURL(),
-                notifier: AppDirectoryNotifier()
+                notifier: AppDirectoryNotifier(),
+                reminderNotifier: AppReminderNotifier()
             )
         )
     }
@@ -110,10 +113,19 @@ final class AppSession: ObservableObject {
 
     func refresh() {
         do {
+            _ = store.processDueReminders()
             state = try store.observableState()
             errorMessage = nil
         } catch {
             errorMessage = "Could not read tasks."
+        }
+    }
+
+    private func startReminderPolling() {
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refresh()
+            }
         }
     }
 }

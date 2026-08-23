@@ -158,6 +158,13 @@ private struct TaskDetailView: View {
         Form {
             LabeledContent("Title", value: task.title)
             LabeledContent("Notes", value: task.notes ?? "—")
+            if let phrase = task.datePhrase {
+                LabeledContent("Date", value: phrase)
+            }
+            if task.isOverdue {
+                Text("Overdue")
+                    .foregroundStyle(.red)
+            }
             LabeledContent("Local path") {
                 if let localPath = task.localPath {
                     Button(localPath) {

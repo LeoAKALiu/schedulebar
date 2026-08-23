@@ -16,10 +16,31 @@ struct MenuBarView: View {
             }
             Divider()
         }
+        if !session.state.overdue.isEmpty {
+            Text("Overdue (\(session.state.overdueCount))")
+            ForEach(session.state.overdue) { task in
+                Text(task.title)
+            }
+            Divider()
+        }
+        if !session.state.today.isEmpty {
+            Text("Today (\(session.state.todayCount))")
+            ForEach(session.state.today) { task in
+                Text(task.title)
+            }
+            Divider()
+        }
+        if !session.state.nextSevenDays.isEmpty {
+            Text("Next 7 days")
+            ForEach(session.state.nextSevenDays) { task in
+                Text(task.title)
+            }
+            Divider()
+        }
         if session.state.menuTasks.isEmpty {
             Text("No tasks yet")
-        } else {
-            ForEach(session.state.menuTasks) { task in
+        } else if !session.state.unscheduledMenuTasks.isEmpty {
+            ForEach(session.state.unscheduledMenuTasks) { task in
                 Text(task.title)
             }
         }

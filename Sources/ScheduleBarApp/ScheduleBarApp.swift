@@ -1,3 +1,4 @@
+import ScheduleBar
 import SwiftUI
 
 @main
@@ -18,8 +19,8 @@ struct ScheduleBarApp: App {
         MenuBarExtra {
             MenuBarView(session: session)
         } label: {
-            if session.state.candidateCount > 0 {
-                Label("\(session.state.candidateCount)", systemImage: "checklist")
+            if let badge = menuBadge(session.state) {
+                Label(badge, systemImage: "checklist")
             } else {
                 Label("ScheduleBar", systemImage: "checklist")
             }
@@ -33,4 +34,12 @@ struct ScheduleBarApp: App {
         }
         .windowResizability(.contentSize)
     }
+}
+
+private func menuBadge(_ state: ObservableState) -> String? {
+    var parts: [String] = []
+    if state.overdueCount > 0 { parts.append("!\(state.overdueCount)") }
+    if state.todayCount > 0 { parts.append("\(state.todayCount)") }
+    if state.candidateCount > 0 { parts.append("\(state.candidateCount)") }
+    return parts.isEmpty ? nil : parts.joined(separator: " ")
 }

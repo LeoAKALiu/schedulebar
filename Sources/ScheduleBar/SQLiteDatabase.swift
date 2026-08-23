@@ -95,6 +95,23 @@ final class SQLiteDatabase {
                 tag TEXT NOT NULL,
                 PRIMARY KEY (task_id, tag)
             );
+            CREATE TABLE IF NOT EXISTS task_dates (
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                phrase TEXT,
+                anchor_at TEXT,
+                instant TEXT,
+                precision TEXT NOT NULL,
+                status TEXT NOT NULL,
+                PRIMARY KEY (task_id, kind)
+            );
+            CREATE TABLE IF NOT EXISTS reminders (
+                id TEXT PRIMARY KEY NOT NULL,
+                task_id TEXT NOT NULL,
+                fire_at TEXT NOT NULL,
+                fired INTEGER NOT NULL DEFAULT 0,
+                fired_at TEXT
+            );
             """
         )
         try? exec("ALTER TABLE tasks ADD COLUMN project_id TEXT;")

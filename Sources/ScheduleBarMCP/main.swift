@@ -60,7 +60,9 @@ private struct MCPStdio {
             messageTime: ISO8601DateFormatter().date(from: string(args["message_time"])) ?? Date(),
             workingDirectory: string(args["cwd"] ?? args["working_directory"]),
             triggerPhrase: string(args["trigger_phrase"] ?? args["user_text"]),
-            excerpt: string(args["excerpt"])
+            excerpt: string(args["excerpt"]),
+            datePhrase: optionalString(args["date_phrase"] ?? args["datePhrase"]),
+            dateKind: dateKind(args["date_kind"] ?? args["dateKind"])
         )
         let url = (ProcessInfo.processInfo.environment["SCHEDULEBAR_STORE"]).map { URL(fileURLWithPath: $0) }
             ?? (try? ScheduleBarPaths.defaultStoreURL())
@@ -106,6 +108,8 @@ private struct MCPStdio {
                     "user_text": ["type": "string"],
                     "excerpt": ["type": "string"],
                     "authority": ["type": "string"],
+                    "date_phrase": ["type": "string"],
+                    "date_kind": ["type": "string"],
                 ],
                 "required": ["title"],
             ],
@@ -114,6 +118,22 @@ private struct MCPStdio {
 
     func authority(_ value: Any?) -> SourceAuthority {
         SourceAuthority(rawValue: string(value)) ?? .mainConversation
+    }
+
+    func dateKind(_ value: Any?) -> DateKind? {
+        let raw = string(value).replacingOccurrences(of: "_", with: "").lowercased()
+        switch raw {
+        case "harddeadline": return .hardDeadline
+        case "planned", "plannedat": return .planned
+        case "target", "targetdate": return .target
+        case "followup": return .followUp
+        default: return nil
+        }
+    }
+
+    func optionalString(_ value: Any?) -> String? {
+        let text = string(value)
+        return text.isEmpty ? nil : text
     }
 
     func string(_ value: Any?) -> String {
