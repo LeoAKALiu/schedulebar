@@ -40,6 +40,7 @@ private func menuBadge(_ state: ObservableState) -> String? {
     var parts: [String] = []
     if state.overdueCount > 0 { parts.append("!\(state.overdueCount)") }
     if state.todayCount > 0 { parts.append("\(state.todayCount)") }
+    if state.nextSevenDaysCount > 0 { parts.append("+\(state.nextSevenDaysCount)") }
     if state.candidateCount > 0 { parts.append("\(state.candidateCount)") }
     return parts.isEmpty ? nil : parts.joined(separator: " ")
 }

@@ -59,17 +59,23 @@ private struct MCPStdio {
         guard name == "capture_work_change" else {
             return ["content": [["type": "text", "text": "未记录"]], "isError": true]
         }
+        let datePhrase = optionalString(args["date_phrase"] ?? args["datePhrase"])
+        let rawMessageTime = optionalString(args["message_time"])
+        let parsedMessageTime = rawMessageTime.flatMap { ISO8601DateFormatter().date(from: $0) }
+        if rawMessageTime != nil, parsedMessageTime == nil, datePhrase != nil {
+            return receiptJSON(Receipt(outcome: .notRecorded))
+        }
         let event = CaptureEvent(
             idempotencyKey: string(args["idempotency_key"] ?? args["capture_id"]),
             title: string(args["title"]),
             authority: authority(args["authority"]),
             threadID: string(args["thread_id"] ?? args["session_id"]),
             turnID: string(args["turn_id"]),
-            messageTime: ISO8601DateFormatter().date(from: string(args["message_time"])) ?? Date(),
+            messageTime: parsedMessageTime ?? Date(),
             workingDirectory: string(args["cwd"] ?? args["working_directory"]),
             triggerPhrase: string(args["trigger_phrase"] ?? args["user_text"]),
             excerpt: string(args["excerpt"]),
-            datePhrase: optionalString(args["date_phrase"] ?? args["datePhrase"]),
+            datePhrase: datePhrase,
             dateKind: dateKind(args["date_kind"] ?? args["dateKind"]),
             ownerName: optionalString(args["owner_name"] ?? args["ownerName"]),
             ownerKind: ownerKind(args["owner_kind"] ?? args["ownerKind"])
@@ -79,8 +85,12 @@ private struct MCPStdio {
         guard let url, !event.idempotencyKey.isEmpty, !event.title.isEmpty else {
             return receiptJSON(Receipt(outcome: .notRecorded))
         }
-        let receipt = CaptureQueue(storeURL: url).enqueue(event)
-        return receiptJSON(receipt)
+        do {
+            let store = try ScheduleBarStore(storeURL: url)
+            return receiptJSON(try store.apply(.capture(event)))
+        } catch {
+            return receiptJSON(Receipt(outcome: .notRecorded))
+        }
     }
 
     func receiptJSON(_ receipt: Receipt) -> [String: Any] {

@@ -124,11 +124,7 @@ private func record(key: String, title: String) -> CaptureEvent {
     )
 }
 
-private func uniqueStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+private func uniqueStoreURL() -> URL { TestFixtures.uniqueStoreURL() }
 
 private final class RecordingNotifier: DirectoryNotifier, @unchecked Sendable {
     private let lock = NSLock()

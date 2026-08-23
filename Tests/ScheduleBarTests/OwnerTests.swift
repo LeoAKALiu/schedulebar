@@ -127,8 +127,4 @@ private func shanghai(_ y: Int, _ m: Int, _ d: Int, _ h: Int, _ min: Int = 0) ->
     return calendar.date(from: DateComponents(year: y, month: m, day: d, hour: h, minute: min))!
 }
 
-private func uniqueOwnerStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+private func uniqueOwnerStoreURL() -> URL { TestFixtures.uniqueStoreURL() }

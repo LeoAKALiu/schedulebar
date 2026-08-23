@@ -96,7 +96,13 @@ struct ConsoleView: View {
                 List(session.state.plans) { plan in
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(plan.items) { item in
-                            Text(item.title)
+                            HStack {
+                                Text(item.title)
+                                Spacer()
+                                Button("Accept") {
+                                    session.acceptPlan(plan.id, [item.id])
+                                }
+                            }
                         }
                         Button("Accept all") {
                             session.acceptPlan(plan.id, plan.items.map(\.id))
@@ -127,8 +133,9 @@ struct ConsoleView: View {
                 TaskDetailView(
                     task: task,
                     session: session,
-                    isCandidate: selectedSection == .candidates,
-                    evidence: showsEvidence ? session.evidence(for: task.id) : nil
+                    isCandidate: isCandidate(task),
+                    isTrash: selectedSection == .trash,
+                    evidenceLinks: showsEvidence(for: task) ? session.evidenceLinks(for: task.id) : []
                 ) {
                     session.confirmCandidate(task.id)
                 } reject: {
@@ -154,6 +161,15 @@ struct ConsoleView: View {
                 selectedTaskID = listedItems.first?.id
             }
         }
+        .overlay(alignment: .top) {
+            if let error = session.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(8)
+                    .background(.background)
+            }
+        }
     }
 
     private var listedItems: [TaskSummary] {
@@ -163,6 +179,7 @@ struct ConsoleView: View {
         case .trash: return session.state.trash
         case .project(let id):
             return session.state.consoleTasks.filter { $0.projectID == id }
+                + session.state.candidates.filter { $0.projectID == id }
         case .milestones: return session.state.milestones
         case .all, .history, .pending, .plans, .recurrence, .diagnostics:
             return session.state.consoleTasks
@@ -176,10 +193,14 @@ struct ConsoleView: View {
         )
     }
 
-    private var showsEvidence: Bool {
+    private func isCandidate(_ task: TaskSummary) -> Bool {
+        session.state.candidates.contains { $0.id == task.id }
+    }
+
+    private func showsEvidence(for task: TaskSummary) -> Bool {
         switch selectedSection {
-        case .all, .project: return true
-        default: return false
+        case .all, .project, .candidates: return true
+        default: return isCandidate(task)
         }
     }
 
@@ -235,17 +256,27 @@ private struct TaskDetailView: View {
     let task: TaskSummary
     @ObservedObject var session: AppSession
     var isCandidate = false
-    var evidence: SourceEvidence?
+    var isTrash = false
+    var evidenceLinks: [SourceEvidence] = []
     var confirm: () -> Void = {}
     var reject: () -> Void = {}
     var archive: () -> Void = {}
     var trash: () -> Void = {}
     var restore: () -> Void = {}
     var delete: () -> Void = {}
+    @State private var editTitle = ""
+    @State private var editNotes = ""
+    @State private var editPath = ""
 
     var body: some View {
         Form {
-            LabeledContent("Title", value: task.title)
+            if isCandidate {
+                TextField("Title", text: $editTitle)
+                TextField("Notes", text: $editNotes)
+                TextField("Local path", text: $editPath)
+            } else {
+                LabeledContent("Title", value: task.title)
+            }
             LabeledContent("Owner", value: task.ownerName ?? "—")
             LabeledContent("Status", value: task.status.rawValue)
             LabeledContent("Kind", value: task.kind.rawValue)
@@ -260,7 +291,9 @@ private struct TaskDetailView: View {
             if task.seriesID != nil {
                 LabeledContent("Occurrence", value: task.occurrenceDate?.formatted(date: .abbreviated, time: .omitted) ?? "—")
             }
-            LabeledContent("Notes", value: task.notes ?? "—")
+            if !isCandidate {
+                LabeledContent("Notes", value: task.notes ?? "—")
+            }
             if let phrase = task.datePhrase {
                 LabeledContent("Date", value: phrase)
             }
@@ -268,27 +301,38 @@ private struct TaskDetailView: View {
                 Text("Overdue")
                     .foregroundStyle(.red)
             }
-            LabeledContent("Local path") {
-                if let localPath = task.localPath {
-                    Button(localPath) {
-                        NSWorkspace.shared.activateFileViewerSelecting([
-                            URL(fileURLWithPath: localPath),
-                        ])
+            if !isCandidate {
+                LabeledContent("Local path") {
+                    if let localPath = task.localPath {
+                        Button(localPath) {
+                            NSWorkspace.shared.activateFileViewerSelecting([
+                                URL(fileURLWithPath: localPath),
+                            ])
+                        }
+                        .buttonStyle(.link)
+                    } else {
+                        Text("—")
                     }
-                    .buttonStyle(.link)
-                } else {
-                    Text("—")
                 }
             }
+            if let error = session.errorMessage {
+                Text(error)
+                    .foregroundStyle(.red)
+            }
             if isCandidate {
+                Button("Save changes") {
+                    session.editCandidate(task.id, title: editTitle, notes: editNotes, localPath: editPath)
+                }
                 Button("Confirm", action: confirm)
                 Button("Reject", role: .destructive, action: reject)
             } else {
+                Button("Not started") { session.setStatus(task.id, .notStarted) }
                 Button("In progress") { session.setStatus(task.id, .inProgress) }
                 Button("Waiting on other") { session.setStatus(task.id, .waitingOnOther) }
                 Button("Blocked") { session.setStatus(task.id, .blocked) }
                 Button("Pending acceptance") { session.setStatus(task.id, .pendingAcceptance) }
                 Button("Complete") { session.setStatus(task.id, .completed) }
+                Button("Cancel", role: .destructive) { session.setStatus(task.id, .cancelled) }
                 Button("Priority: low") { session.setPriority(task.id, .low) }
                 Button("Priority: normal") { session.setPriority(task.id, .normal) }
                 Button("Priority: high") { session.setPriority(task.id, .high) }
@@ -298,18 +342,32 @@ private struct TaskDetailView: View {
                 }
                 Button("Archive", action: archive)
                 Button("Move to Trash", action: trash)
-                Button("Restore", action: restore)
-                Button("Delete permanently", role: .destructive, action: delete)
+                if isTrash {
+                    Button("Restore", action: restore)
+                    Button("Delete permanently", role: .destructive, action: delete)
+                }
             }
-            if let evidence {
+            if !evidenceLinks.isEmpty {
                 DisclosureGroup("Source evidence") {
-                    LabeledContent("Trigger", value: evidence.triggerPhrase)
-                    LabeledContent("Excerpt", value: evidence.excerpt)
-                    LabeledContent("Directory", value: evidence.workingDirectory)
+                    ForEach(Array(evidenceLinks.enumerated()), id: \.offset) { _, evidence in
+                        LabeledContent("Trigger", value: evidence.triggerPhrase)
+                        LabeledContent("Excerpt", value: evidence.excerpt)
+                        LabeledContent("Directory", value: evidence.workingDirectory)
+                    }
                 }
             }
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear {
+            editTitle = task.title
+            editNotes = task.notes ?? ""
+            editPath = task.localPath ?? ""
+        }
+        .onChange(of: task.id) { _, _ in
+            editTitle = task.title
+            editNotes = task.notes ?? ""
+            editPath = task.localPath ?? ""
+        }
     }
 }

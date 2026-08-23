@@ -32,7 +32,7 @@ struct MenuBarView: View {
             Divider()
         }
         if !session.state.nextSevenDays.isEmpty {
-            Text("Next 7 days")
+            Text("Next 7 days (\(session.state.nextSevenDaysCount))")
             ForEach(session.state.nextSevenDays) { task in
                 TaskStatusMenu(task: task, session: session)
             }

@@ -3,7 +3,9 @@ import ScheduleBar
 import Testing
 
 @Test func explicitChatWorkRecordEntersTheSameQueueAndReadModel() throws {
-    let url = uniqueChatWorkStoreURL()
+    let url = TestFixtures.uniqueStoreURL()
+    let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     let receipt = ChatWorkHandoff.submit(
         "record as task File weekly report",
         storeURL: url,
@@ -12,17 +14,13 @@ import Testing
     )
     #expect(receipt.outcome == .recorded)
     #expect(receipt.summaryLine.contains("File weekly report") || receipt.outcome == .recorded)
-
-    let store = try ScheduleBarStore(storeURL: url)
-    try TestFixtures.mapDefaultDirectory(store)
-    _ = store.processInbox()
-    let state = try store.observableState()
+    let state = try ScheduleBarStore(storeURL: url).observableState()
     #expect(state.menuTasks.map(\.title) == ["File weekly report"])
     #expect(state.consoleTasks.map(\.title) == ["File weekly report"])
 }
 
 @Test func ordinaryChatWorkTextIsNotMonitored() throws {
-    let url = uniqueChatWorkStoreURL()
+    let url = TestFixtures.uniqueStoreURL()
     let receipt = ChatWorkHandoff.submit(
         "How does the parser work? Just thinking out loud.",
         storeURL: url,
@@ -38,7 +36,9 @@ import Testing
 }
 
 @Test func explicitChatWorkDuplicateAndFailureAreVisible() throws {
-    let url = uniqueChatWorkStoreURL()
+    let url = TestFixtures.uniqueStoreURL()
+    let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     let first = ChatWorkHandoff.submit(
         "记录为任务 准备幻灯片",
         storeURL: url,
@@ -74,8 +74,4 @@ import Testing
     #expect(CapturePolicy.chatWorkHelpText.lowercased().contains("record") || CapturePolicy.chatWorkHelpText.contains("记录"))
 }
 
-private func uniqueChatWorkStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+

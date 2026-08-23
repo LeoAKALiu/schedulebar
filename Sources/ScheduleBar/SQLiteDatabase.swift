@@ -218,6 +218,14 @@ final class SQLiteDatabase {
         try? exec("ALTER TABLE tasks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';")
         try? exec("ALTER TABLE tasks ADD COLUMN trashed_at TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human';")
+        try? exec("ALTER TABLE tasks ADD COLUMN status_authority TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_phrase TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_kind TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_anchor TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_precision TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_status TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN date_instant TEXT;")
+        try? exec("ALTER TABLE plans ADD COLUMN message_time TEXT;")
     }
 
     func exec(_ sql: String) throws {

@@ -136,11 +136,7 @@ private final class ReceiptBox: @unchecked Sendable {
     }
 }
 
-private func uniqueStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+private func uniqueStoreURL() -> URL { TestFixtures.uniqueStoreURL() }
 
 private func repoRoot() -> URL {
     URL(fileURLWithPath: #filePath)

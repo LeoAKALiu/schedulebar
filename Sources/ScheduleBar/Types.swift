@@ -487,19 +487,22 @@ public struct PlanProposal: Equatable, Sendable, Codable {
     public var turnID: String
     public var workingDirectory: String
     public var items: [PlanItem]
+    public var messageTime: Date
 
     public init(
         idempotencyKey: String,
         threadID: String,
         turnID: String,
         workingDirectory: String,
-        items: [PlanItem]
+        items: [PlanItem],
+        messageTime: Date = Date()
     ) {
         self.idempotencyKey = idempotencyKey
         self.threadID = threadID
         self.turnID = turnID
         self.workingDirectory = workingDirectory
         self.items = items
+        self.messageTime = messageTime
     }
 }
 
@@ -564,6 +567,7 @@ public struct ObservableState: Equatable, Sendable {
     public var candidateCount: Int { candidates.count }
     public var todayCount: Int { today.count }
     public var overdueCount: Int { overdue.count }
+    public var nextSevenDaysCount: Int { nextSevenDays.count }
     public var unscheduledMenuTasks: [TaskSummary] {
         let grouped = Set(overdue.map(\.id) + today.map(\.id) + nextSevenDays.map(\.id) + waitingOnOthers.map(\.id))
         return menuTasks.filter { !grouped.contains($0.id) && $0.status != .completed && $0.status != .cancelled }

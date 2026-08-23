@@ -66,8 +66,4 @@ import Testing
     #expect(task.localPath == "/tmp/report.md")
 }
 
-private func uniqueStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+private func uniqueStoreURL() -> URL { TestFixtures.uniqueStoreURL() }

@@ -58,111 +58,94 @@ final class AppSession: ObservableObject {
     }
 
     func confirmCandidate(_ id: TaskSummary.ID) {
-        errorMessage = nil
-        do {
-            _ = try store.reviewCandidate(id, decision: .confirm)
-            state = try store.observableState()
-        } catch {
-            errorMessage = "Could not confirm the candidate."
-        }
+        perform(.reviewCandidate(id, .confirm), failure: "Could not confirm the candidate.")
+    }
+
+    func editCandidate(_ id: TaskSummary.ID, title: String, notes: String, localPath: String) {
+        perform(
+            .reviewCandidate(id, .edit(QuickAddInput(title: title, notes: notes, localPath: localPath))),
+            failure: "Could not save the candidate."
+        )
     }
 
     func rejectCandidate(_ id: TaskSummary.ID) {
-        errorMessage = nil
-        do {
-            _ = try store.reviewCandidate(id, decision: .reject)
-            state = try store.observableState()
-        } catch {
-            errorMessage = "Could not reject the candidate."
-        }
+        perform(.reviewCandidate(id, .reject), failure: "Could not reject the candidate.")
     }
 
     func archive(_ id: TaskSummary.ID) {
-        _ = try? store.apply(.archive(id))
-        refresh()
+        perform(.archive(id), failure: "Could not archive the task.")
     }
 
     func trash(_ id: TaskSummary.ID) {
-        _ = try? store.apply(.trash(id))
-        refresh()
+        perform(.trash(id), failure: "Could not move the task to trash.")
     }
 
     func restore(_ id: TaskSummary.ID) {
-        _ = try? store.apply(.restoreFromTrash(id))
-        refresh()
+        perform(.restoreFromTrash(id), failure: "Could not restore the task.")
     }
 
     func permanentlyDelete(_ id: TaskSummary.ID) {
-        _ = try? store.apply(.permanentlyDelete(id), authority: .human)
-        refresh()
+        perform(.permanentlyDelete(id), failure: "Could not delete the task.")
     }
 
     func undoAutomatic() {
-        _ = try? store.apply(.undoLastAutomaticChange)
-        refresh()
+        perform(.undoLastAutomaticChange, failure: "Could not undo the last automatic change.")
     }
 
     func createProject(for path: String, name: String) {
-        _ = try? store.apply(.resolveDirectory(path, .create(name: name)))
-        refresh()
+        perform(.resolveDirectory(path, .create(name: name)), failure: "Could not create the project.")
     }
 
     func linkDirectory(_ path: String, to projectID: UUID) {
-        _ = try? store.apply(.resolveDirectory(path, .link(projectID: projectID)))
-        refresh()
+        perform(.resolveDirectory(path, .link(projectID: projectID)), failure: "Could not link the directory.")
     }
 
     func ignoreDirectory(_ path: String) {
-        _ = try? store.apply(.resolveDirectory(path, .ignore))
-        refresh()
+        perform(.resolveDirectory(path, .ignore), failure: "Could not ignore the directory.")
     }
 
     func evidence(for id: TaskSummary.ID) -> SourceEvidence? {
         try? store.sourceEvidence(for: id)
     }
 
+    func evidenceLinks(for id: TaskSummary.ID) -> [SourceEvidence] {
+        (try? store.sourceLinks(for: id)) ?? []
+    }
+
     func setStatus(_ id: TaskSummary.ID, _ status: WorkflowStatus) {
-        _ = try? store.apply(.setStatus(id, status), authority: .human)
-        refresh()
+        perform(.setStatus(id, status), failure: "Could not change status.")
     }
 
     func setOwner(_ id: TaskSummary.ID, _ owner: OwnerSummary) {
-        _ = try? store.apply(.setOwner(id, owner.name, owner.kind), authority: .human)
-        refresh()
+        perform(.setOwner(id, owner.name, owner.kind), failure: "Could not assign the owner.")
     }
 
     func acceptPlan(_ id: UUID, _ itemIDs: [UUID]) {
-        _ = try? store.apply(.acceptPlan(id, itemIDs), authority: .human)
-        refresh()
+        perform(.acceptPlan(id, itemIDs), failure: "Could not accept the plan.")
     }
 
     func setPriority(_ id: TaskSummary.ID, _ priority: BusinessPriority) {
-        _ = try? store.apply(.setPriority(id, priority), authority: .human)
-        refresh()
+        perform(.setPriority(id, priority), failure: "Could not change priority.")
     }
 
     func setBlockedBy(_ id: TaskSummary.ID, _ blockerID: UUID) {
-        _ = try? store.apply(.setBlockedBy(id, blockerID), authority: .human)
-        refresh()
+        perform(.setBlockedBy(id, blockerID), failure: "Could not set the blocker.")
     }
 
     func stopRecurrence(_ id: UUID) {
-        _ = try? store.apply(.stopRecurrence(id), authority: .human)
-        refresh()
+        perform(.stopRecurrence(id), failure: "Could not stop recurrence.")
     }
 
     func retryFailures() {
-        _ = try? store.apply(.retryFailures)
+        perform(.retryFailures, failure: "Could not retry failed operations.")
         Task {
             await store.processModelMisses()
             refresh()
         }
-        refresh()
     }
 
     func setLoginAtStartup(_ enabled: Bool) {
-        _ = try? store.apply(.setLoginAtStartup(enabled))
-        refresh()
+        perform(.setLoginAtStartup(enabled), failure: "Could not update the login item.")
     }
 
     func exportDiagnostics() {
@@ -189,13 +172,29 @@ final class AppSession: ObservableObject {
 
     func refresh() {
         do {
+            _ = store.processInbox()
             _ = store.reconcileSessions()
             _ = store.processDueReminders()
             _ = store.processRecurrences()
             state = try store.observableState()
-            errorMessage = nil
         } catch {
             errorMessage = "Could not read tasks."
+        }
+    }
+
+    private func perform(_ event: InputEvent, failure: String) {
+        errorMessage = nil
+        do {
+            _ = try store.apply(event, authority: .human)
+            state = try store.observableState()
+        } catch ScheduleBarError.emptyTitle {
+            errorMessage = "Title is required."
+        } catch ScheduleBarError.notPermitted {
+            errorMessage = failure
+        } catch ScheduleBarError.notFound {
+            errorMessage = failure
+        } catch {
+            errorMessage = failure
         }
     }
 

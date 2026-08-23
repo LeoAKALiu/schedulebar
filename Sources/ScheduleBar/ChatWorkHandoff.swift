@@ -54,7 +54,12 @@ public enum ChatWorkHandoff {
         ) else {
             return Receipt(outcome: .notRecorded)
         }
-        return CaptureQueue(storeURL: storeURL).enqueue(event)
+        do {
+            let store = try ScheduleBarStore(storeURL: storeURL)
+            return try store.apply(.capture(event))
+        } catch {
+            return Receipt(outcome: .notRecorded)
+        }
     }
 
     private static func explicitTrigger(in text: String) -> String? {

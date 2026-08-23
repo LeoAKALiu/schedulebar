@@ -304,7 +304,9 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 SELECT r.id, r.fire_at, t.title
                 FROM reminders r
                 JOIN tasks t ON t.id = r.task_id
-                WHERE r.fired = 0 AND t.lifecycle = 'active'
+                WHERE r.fired = 0
+                  AND t.lifecycle = 'active'
+                  AND t.workflow_status NOT IN ('completed', 'cancelled')
                 ORDER BY r.fire_at ASC;
                 """
             )
@@ -348,21 +350,46 @@ public final class ScheduleBarStore: @unchecked Sendable {
             try appendHistory(summary: "Rejected candidate", automatic: false, action: "reject_candidate", targetID: id, table: "candidates")
             return Receipt(outcome: .ignored, summaryLine: "Candidate rejected")
         case .confirm:
-            guard let title = try candidateTitle(id) else {
+            guard let row = try candidateRecord(id) else {
                 throw ScheduleBarError.storeUnavailable
             }
-            let receipt = try insertTask(title: title, notes: nil, localPath: nil, origin: "human", projectID: try inboxProjectID())
-            try markCandidate(id, status: "confirmed")
-            try appendHistory(summary: "Confirmed candidate: \(title)", automatic: false, action: "confirm_candidate", targetID: receipt.taskID, table: "tasks")
-            return receipt
+            return try confirmCandidate(row, title: row.title, notes: nil, localPath: nil)
         case .edit(let input):
             let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
-            let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human", projectID: try inboxProjectID())
-            try markCandidate(id, status: "confirmed")
-            try appendHistory(summary: "Confirmed candidate: \(title)", automatic: false, action: "confirm_candidate", targetID: receipt.taskID, table: "tasks")
-            return receipt
+            guard let row = try candidateRecord(id) else {
+                throw ScheduleBarError.storeUnavailable
+            }
+            return try confirmCandidate(row, title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath))
         }
+    }
+
+    private func confirmCandidate(
+        _ row: CandidateRecord,
+        title: String,
+        notes: String?,
+        localPath: String?
+    ) throws -> Receipt {
+        let projectID = try row.projectID ?? inboxProjectID()
+        let receipt = try insertTask(
+            title: title,
+            notes: notes,
+            localPath: localPath,
+            origin: "human",
+            projectID: projectID
+        )
+        if let parsed = row.date, let taskID = receipt.taskID {
+            try attachDate(parsed, to: taskID)
+        }
+        try markCandidate(row.id, status: "confirmed")
+        try appendHistory(
+            summary: "Confirmed candidate: \(title)",
+            automatic: false,
+            action: "confirm_candidate",
+            targetID: receipt.taskID,
+            table: "tasks"
+        )
+        return receipt
     }
 
     private func applyPending(key: String, payload: String) -> Receipt {
@@ -370,78 +397,91 @@ public final class ScheduleBarStore: @unchecked Sendable {
         defer { database.lock.unlock() }
         do {
             let event = try decode(payload)
-            try discoverDirectory(event.workingDirectory)
-            let mappedProject = try projectID(forDirectory: event.workingDirectory)
-            let parsedDate = DateParser.parse(phrase: event.datePhrase, kind: event.dateKind, at: event.messageTime)
-            var classified = CaptureClassifier.outcome(for: event)
-            if classified == .recorded, mappedProject == nil {
-                classified = .candidate
-            }
-            if classified == .recorded, parsedDate?.isVague == true {
-                classified = .candidate
-            }
-            let recurrence = RecurrenceParser.parse(event)
-            if classified == .recorded, recurrence == .vague || recurrence == .complex {
-                classified = .candidate
-            }
-            var taskID: UUID?
-            switch classified {
-            case .recorded:
-                let created = try insertTask(
-                    title: event.title,
-                    notes: nil,
-                    localPath: nil,
-                    origin: "capture",
-                    projectID: mappedProject,
-                    ownerName: event.ownerName,
-                    ownerKind: event.ownerKind,
-                    priority: PriorityParser.parse(event) ?? .normal
-                )
-                taskID = created.taskID
-                if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
-                    try attachDate(parsedDate, to: createdID)
-                }
-                if case .rule(let rule) = recurrence, let createdID = created.taskID {
-                    _ = try attachRecurrence(to: createdID, rule: rule)
-                }
-                try insertEvidence(taskID: created.taskID, event: event)
-                try appendHistory(
-                    summary: "Captured: \(event.title)",
-                    automatic: true,
-                    action: "create_task",
-                    targetID: created.taskID,
-                    table: "tasks"
-                )
-            case .candidate:
-                taskID = try insertCandidate(title: event.title, inboxKey: key, projectID: mappedProject)
-                try appendHistory(
-                    summary: "Candidate: \(event.title)",
-                    automatic: true,
-                    action: "create_candidate",
-                    targetID: taskID,
-                    table: "candidates"
-                )
-            case .ignored, .duplicate, .notRecorded:
-                break
-            }
-            try enqueueModelJob(event)
-            let stmt = try database.prepare(
-                "UPDATE capture_inbox SET status = 'processed', task_id = ? WHERE idempotency_key = ?;"
-            )
-            defer { sqlite3_finalize(stmt) }
-            database.bind(stmt, 1, taskID?.uuidString)
-            database.bind(stmt, 2, key)
-            guard sqlite3_step(stmt) == SQLITE_DONE else {
+            try database.exec("BEGIN IMMEDIATE;")
+            do {
+                let receipt = try classifyAndApply(event, inboxKey: key)
+                try database.exec("COMMIT;")
+                return receipt
+            } catch {
+                try? database.exec("ROLLBACK;")
                 return Receipt(outcome: .notRecorded)
             }
-            return Receipt(
-                outcome: classified,
-                taskID: taskID,
-                summaryLine: summary(classified, title: event.title)
-            )
         } catch {
             return Receipt(outcome: .notRecorded)
         }
+    }
+
+    private func classifyAndApply(_ event: CaptureEvent, inboxKey: String) throws -> Receipt {
+        try discoverDirectory(event.workingDirectory)
+        let mappedProject = try projectID(forDirectory: event.workingDirectory)
+        let parsedDate = DateParser.parse(phrase: event.datePhrase, kind: event.dateKind, at: event.messageTime)
+        var classified = CaptureClassifier.outcome(for: event)
+        if classified == .recorded, mappedProject == nil {
+            classified = .candidate
+        }
+        if classified == .recorded, parsedDate?.isVague == true {
+            classified = .candidate
+        }
+        let recurrence = RecurrenceParser.parse(event)
+        if classified == .recorded, recurrence == .vague || recurrence == .complex {
+            classified = .candidate
+        }
+        var taskID: UUID?
+        switch classified {
+        case .recorded:
+            let created = try insertTask(
+                title: event.title,
+                notes: nil,
+                localPath: nil,
+                origin: "capture",
+                projectID: mappedProject,
+                ownerName: event.ownerName,
+                ownerKind: event.ownerKind,
+                priority: PriorityParser.parse(event) ?? .normal
+            )
+            taskID = created.taskID
+            if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
+                try attachDate(parsedDate, to: createdID)
+            }
+            if case .rule(let rule) = recurrence, let createdID = created.taskID {
+                _ = try attachRecurrence(to: createdID, rule: rule)
+            }
+            try insertEvidence(taskID: created.taskID, event: event)
+            try appendHistory(
+                summary: "Captured: \(event.title)",
+                automatic: true,
+                action: "create_task",
+                targetID: created.taskID,
+                table: "tasks"
+            )
+        case .candidate:
+            taskID = try insertCandidate(title: event.title, inboxKey: inboxKey, projectID: mappedProject, date: parsedDate)
+            try insertEvidence(taskID: taskID, event: event)
+            try appendHistory(
+                summary: "Candidate: \(event.title)",
+                automatic: true,
+                action: "create_candidate",
+                targetID: taskID,
+                table: "candidates"
+            )
+        case .ignored, .duplicate, .notRecorded:
+            break
+        }
+        try enqueueModelJob(event)
+        let stmt = try database.prepare(
+            "UPDATE capture_inbox SET status = 'processed', task_id = ? WHERE idempotency_key = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID?.uuidString)
+        database.bind(stmt, 2, inboxKey)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw ScheduleBarError.storeUnavailable
+        }
+        return Receipt(
+            outcome: classified,
+            taskID: taskID,
+            summaryLine: summary(classified, title: event.title)
+        )
     }
 
     private func quickAdd(_ input: QuickAddInput) throws -> Receipt {
@@ -513,9 +553,15 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func loadCandidates(projectID: UUID?) throws -> [TaskSummary] {
         let sql: String
         if projectID == nil {
-            sql = "SELECT id, title, notes, project_id FROM candidates WHERE status = 'open' ORDER BY created_at DESC;"
+            sql = """
+                SELECT id, title, notes, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+                FROM candidates WHERE status = 'open' ORDER BY created_at DESC;
+                """
         } else {
-            sql = "SELECT id, title, notes, project_id FROM candidates WHERE status = 'open' AND project_id = ? ORDER BY created_at DESC;"
+            sql = """
+                SELECT id, title, notes, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+                FROM candidates WHERE status = 'open' AND project_id = ? ORDER BY created_at DESC;
+                """
         }
         let stmt = try database.prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -528,23 +574,38 @@ public final class ScheduleBarStore: @unchecked Sendable {
                   let id = UUID(uuidString: idText),
                   let title = database.column(stmt, 1)
             else { continue }
+            let parsed = parsedDate(
+                phrase: database.column(stmt, 4),
+                kind: database.column(stmt, 5),
+                anchor: database.column(stmt, 6),
+                precision: database.column(stmt, 7),
+                status: database.column(stmt, 8),
+                instant: database.column(stmt, 9)
+            )
             items.append(
                 TaskSummary(
                     id: id,
                     title: title,
                     notes: database.column(stmt, 2),
-                    projectID: database.column(stmt, 3).flatMap(UUID.init(uuidString:))
+                    projectID: database.column(stmt, 3).flatMap(UUID.init(uuidString:)),
+                    datePhrase: parsed?.phrase,
+                    datePrecision: parsed?.precision
                 )
             )
         }
         return items
     }
 
-    private func insertCandidate(title: String, inboxKey: String, projectID: UUID?) throws -> UUID {
+    private func insertCandidate(title: String, inboxKey: String, projectID: UUID?, date: ParsedDate? = nil) throws -> UUID {
         let id = UUID()
         let createdAt = iso(now())
         let stmt = try database.prepare(
-            "INSERT INTO candidates (id, title, notes, inbox_key, status, created_at, project_id) VALUES (?, ?, NULL, ?, 'open', ?, ?);"
+            """
+            INSERT INTO candidates (
+                id, title, notes, inbox_key, status, created_at, project_id,
+                date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+            ) VALUES (?, ?, NULL, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?);
+            """
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, id.uuidString)
@@ -552,6 +613,12 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(stmt, 3, inboxKey)
         database.bind(stmt, 4, createdAt)
         database.bind(stmt, 5, projectID?.uuidString)
+        database.bind(stmt, 6, date?.phrase)
+        database.bind(stmt, 7, date?.kind.rawValue)
+        database.bind(stmt, 8, date.map { iso($0.anchor) })
+        database.bind(stmt, 9, date?.precision.rawValue)
+        database.bind(stmt, 10, date?.status.rawValue)
+        database.bind(stmt, 11, date?.instant.map(iso))
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -568,22 +635,56 @@ public final class ScheduleBarStore: @unchecked Sendable {
         }
     }
 
-    private func candidateTitle(_ id: UUID) throws -> String? {
-        let stmt = try database.prepare("SELECT title FROM candidates WHERE id = ? AND status = 'open';")
+    private func candidateRecord(_ id: UUID) throws -> CandidateRecord? {
+        let stmt = try database.prepare(
+            """
+            SELECT title, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+            FROM candidates WHERE id = ? AND status = 'open';
+            """
+        )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, id.uuidString)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return database.column(stmt, 0)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let title = database.column(stmt, 0) else { return nil }
+        return CandidateRecord(
+            id: id,
+            title: title,
+            projectID: database.column(stmt, 1).flatMap(UUID.init(uuidString:)),
+            date: parsedDate(
+                phrase: database.column(stmt, 2),
+                kind: database.column(stmt, 3),
+                anchor: database.column(stmt, 4),
+                precision: database.column(stmt, 5),
+                status: database.column(stmt, 6),
+                instant: database.column(stmt, 7)
+            )
+        )
+    }
+
+    private func parsedDate(
+        phrase: String?,
+        kind: String?,
+        anchor: String?,
+        precision: String?,
+        status: String?,
+        instant: String?
+    ) -> ParsedDate? {
+        guard let phrase, !phrase.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        return ParsedDate(
+            kind: kind.flatMap(DateKind.init(rawValue:)) ?? .planned,
+            phrase: phrase,
+            anchor: anchor.flatMap(formatter.date(from:)) ?? now(),
+            instant: instant.flatMap(formatter.date(from:)),
+            precision: precision.flatMap(DatePrecision.init(rawValue:)) ?? .vague,
+            status: status.flatMap(DateParseStatus.init(rawValue:)) ?? .vague
+        )
     }
 
     private func summary(_ outcome: Outcome, title: String) -> String {
-        switch outcome {
-        case .recorded: return "Recorded: \(title)"
-        case .candidate: return "Saved as candidate"
-        case .ignored: return "Ignored"
-        case .duplicate: return "Already recorded"
-        case .notRecorded: return "未记录"
+        if outcome == .recorded {
+            return "Recorded: \(title)"
         }
+        return outcome.defaultSummaryLine
     }
 
     private func loadTasks(lifecycle: String, projectID: UUID?) throws -> [TaskSummary] {
@@ -714,11 +815,12 @@ public final class ScheduleBarStore: @unchecked Sendable {
         defer { sqlite3_finalize(check) }
         database.bind(check, 1, id.uuidString)
         guard sqlite3_step(check) == SQLITE_ROW else { throw ScheduleBarError.notFound }
-        try database.exec("DELETE FROM source_evidence WHERE task_id = '\(id.uuidString)';")
-        try database.exec("DELETE FROM task_dates WHERE task_id = '\(id.uuidString)';")
-        try database.exec("DELETE FROM reminders WHERE task_id = '\(id.uuidString)';")
-        try database.exec("DELETE FROM task_tags WHERE task_id = '\(id.uuidString)';")
-        try database.exec("DELETE FROM tasks WHERE id = '\(id.uuidString)';")
+        try execChange("DELETE FROM source_evidence WHERE task_id = ?;", id.uuidString)
+        try execChange("DELETE FROM source_links WHERE task_id = ?;", id.uuidString)
+        try execChange("DELETE FROM task_dates WHERE task_id = ?;", id.uuidString)
+        try execChange("DELETE FROM reminders WHERE task_id = ?;", id.uuidString)
+        try execChange("DELETE FROM task_tags WHERE task_id = ?;", id.uuidString)
+        try execChange("DELETE FROM tasks WHERE id = ?;", id.uuidString)
         try appendHistory(summary: "Permanently deleted", automatic: false, action: "delete", targetID: id, table: "tasks")
         return Receipt(outcome: .recorded, taskID: id, summaryLine: "Permanently deleted")
     }
@@ -741,13 +843,26 @@ public final class ScheduleBarStore: @unchecked Sendable {
               let table = database.column(stmt, 3)
         else { throw ScheduleBarError.notFound }
         if action == "create_task", table == "tasks" {
-            try database.exec("UPDATE tasks SET lifecycle = 'undone' WHERE id = '\(target)';")
+            try execChange("UPDATE tasks SET lifecycle = 'undone' WHERE id = ?;", target)
         } else if action == "create_candidate", table == "candidates" {
-            try database.exec("UPDATE candidates SET status = 'undone' WHERE id = '\(target)';")
+            try execChange("UPDATE candidates SET status = 'undone' WHERE id = ?;", target)
+        } else if action == "propose_plan", table == "plans" {
+            try execChange("UPDATE plans SET status = 'undone' WHERE id = ?;", target)
+        } else if action == "satisfy_acceptance", table == "tasks" {
+            try execChange("UPDATE acceptance_evidence SET satisfied = 0 WHERE task_id = ?;", target)
         }
-        try database.exec("UPDATE history SET undone = 1 WHERE id = '\(historyID)';")
+        try execChange("UPDATE history SET undone = 1 WHERE id = ?;", historyID)
         try appendHistory(summary: "Undo automatic change", automatic: false, action: "undo", targetID: UUID(uuidString: target), table: table)
         return Receipt(outcome: .recorded, summaryLine: "Undo automatic change")
+    }
+
+    private func execChange(_ sql: String, _ value: String) throws {
+        let stmt = try database.prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, value)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw ScheduleBarError.storeUnavailable
+        }
     }
 
     private func updateLifecycle(_ id: UUID, _ lifecycle: String, trashedAt: String?) throws {
@@ -1123,9 +1238,9 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(stmt, 2, taskID.uuidString)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
         if kind != .selfPerson {
-            try updateWorkflowIfNeeded(taskID, to: .waitingOnOther, unless: [.blocked, .pendingAcceptance, .completed, .cancelled])
+            try updateWorkflowIfNeeded(taskID, to: .waitingOnOther, unless: [.blocked, .pendingAcceptance, .completed, .cancelled], authority: .human)
         } else {
-            try updateWorkflowIfNeeded(taskID, to: .notStarted, onlyIf: [.waitingOnOther])
+            try updateWorkflowIfNeeded(taskID, to: .notStarted, onlyIf: [.waitingOnOther], authority: .human)
         }
         try appendHistory(summary: "Assigned owner \(name)", automatic: false, action: "set_owner", targetID: taskID, table: "tasks")
         return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Assigned owner \(name)")
@@ -1159,7 +1274,18 @@ public final class ScheduleBarStore: @unchecked Sendable {
         if status == .completed, authority != .human, try !acceptanceMet(taskID) {
             resolved = .pendingAcceptance
         }
-        try writeWorkflowStatus(taskID, resolved)
+        if authority != .human {
+            try rejectNonHumanStatusOverwrite(taskID, resolved: resolved, requested: status)
+        }
+        let recordedAuthority: SourceAuthority?
+        if authority == .human {
+            recordedAuthority = .human
+        } else if try statusAuthority(taskID) == .human {
+            recordedAuthority = nil
+        } else {
+            recordedAuthority = authority
+        }
+        try writeWorkflowStatus(taskID, resolved, authority: recordedAuthority)
         if resolved == .cancelled {
             try updateLifecycle(taskID, "cancelled", trashedAt: nil)
         }
@@ -1174,6 +1300,26 @@ public final class ScheduleBarStore: @unchecked Sendable {
             try refreshDependents(of: taskID)
         }
         return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Status: \(resolved.rawValue)")
+    }
+
+    private func rejectNonHumanStatusOverwrite(
+        _ taskID: UUID,
+        resolved: WorkflowStatus,
+        requested: WorkflowStatus
+    ) throws {
+        let current = try currentStatus(taskID)
+        if resolved == current { return }
+        if try statusAuthority(taskID) == .human {
+            let completionReport = requested == .completed && resolved == .pendingAcceptance
+            if !completionReport {
+                throw ScheduleBarError.notPermitted
+            }
+            return
+        }
+        let allowed: Set<WorkflowStatus> = [.inProgress, .blocked, .waitingOnOther, .pendingAcceptance]
+        if allowed.contains(resolved) { return }
+        if resolved == .completed, try acceptanceMet(taskID) { return }
+        throw ScheduleBarError.notPermitted
     }
 
     private func requireAcceptance(_ taskID: UUID, _ criterion: String) throws -> Receipt {
@@ -1289,14 +1435,23 @@ public final class ScheduleBarStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_ROW else { throw ScheduleBarError.notFound }
     }
 
-    private func writeWorkflowStatus(_ taskID: UUID, _ status: WorkflowStatus) throws {
-        let stmt = try database.prepare("UPDATE tasks SET workflow_status = ? WHERE id = ?;")
+    private func writeWorkflowStatus(_ taskID: UUID, _ status: WorkflowStatus, authority: SourceAuthority? = nil) throws {
+        let stmt = try database.prepare("UPDATE tasks SET workflow_status = ?, status_authority = COALESCE(?, status_authority) WHERE id = ?;")
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, status.rawValue)
-        database.bind(stmt, 2, taskID.uuidString)
+        database.bind(stmt, 2, authority?.rawValue)
+        database.bind(stmt, 3, taskID.uuidString)
         guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else {
             throw ScheduleBarError.notFound
         }
+    }
+
+    private func statusAuthority(_ taskID: UUID) throws -> SourceAuthority? {
+        let stmt = try database.prepare("SELECT status_authority FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw ScheduleBarError.notFound }
+        return database.column(stmt, 0).flatMap(SourceAuthority.init(rawValue:))
     }
 
     private func currentStatus(_ taskID: UUID) throws -> WorkflowStatus {
@@ -1311,13 +1466,14 @@ public final class ScheduleBarStore: @unchecked Sendable {
         _ taskID: UUID,
         to status: WorkflowStatus,
         unless excluded: [WorkflowStatus] = [],
-        onlyIf allowed: [WorkflowStatus]? = nil
+        onlyIf allowed: [WorkflowStatus]? = nil,
+        authority: SourceAuthority? = nil
     ) throws {
         let current = try currentStatus(taskID)
         if let allowed, !allowed.contains(current) { return }
         if excluded.contains(current) { return }
         if current != status {
-            try writeWorkflowStatus(taskID, status)
+            try writeWorkflowStatus(taskID, status, authority: authority)
         }
     }
 
@@ -1346,8 +1502,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let id = UUID()
         let stmt = try database.prepare(
             """
-            INSERT OR IGNORE INTO plans (id, idempotency_key, thread_id, turn_id, working_directory, payload, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'open');
+            INSERT OR IGNORE INTO plans (id, idempotency_key, thread_id, turn_id, working_directory, payload, status, message_time)
+            VALUES (?, ?, ?, ?, ?, ?, 'open', ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -1357,6 +1513,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(stmt, 4, proposal.turnID)
         database.bind(stmt, 5, proposal.workingDirectory)
         database.bind(stmt, 6, payload)
+        database.bind(stmt, 7, iso(proposal.messageTime))
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
         if database.changes == 0 {
             return Receipt(outcome: .duplicate, summaryLine: "Already recorded")
@@ -1369,7 +1526,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.lock.lock()
         defer { database.lock.unlock() }
         let stmt = try database.prepare(
-            "SELECT payload, thread_id, turn_id, working_directory FROM plans WHERE id = ? AND status = 'open';"
+            "SELECT payload, thread_id, turn_id, working_directory, message_time FROM plans WHERE id = ? AND status = 'open';"
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, planID.uuidString)
@@ -1381,6 +1538,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let threadID = database.column(stmt, 1) ?? ""
         let turnID = database.column(stmt, 2) ?? ""
         let workingDirectory = database.column(stmt, 3) ?? ""
+        let messageTime = database.column(stmt, 4).flatMap { ISO8601DateFormatter().date(from: $0) } ?? now()
         let accepted = Set(itemIDs)
         let chosen = items.filter { accepted.contains($0.id) }
         let projectID = try projectID(forDirectory: workingDirectory) ?? inboxProjectID()
@@ -1411,7 +1569,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                     necessary: item.necessary
                 )
                 if let phrase = item.datePhrase,
-                   let parsed = DateParser.parse(phrase: phrase, kind: item.dateKind, at: now()),
+                   let parsed = DateParser.parse(phrase: phrase, kind: item.dateKind, at: messageTime),
                    !parsed.isVague {
                     try attachDate(parsed, to: item.id)
                 }
@@ -1429,6 +1587,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 remaining.removeAll { $0.id == item.id }
             }
         }
+        try execChange("UPDATE plans SET status = 'accepted' WHERE id = ? AND status = 'open';", planID.uuidString)
         try appendHistory(summary: "Accepted plan items", automatic: false, action: "accept_plan", targetID: planID, table: "plans")
         return Receipt(outcome: .recorded, taskID: planID, summaryLine: "Accepted plan items")
     }
@@ -1536,17 +1695,14 @@ public final class ScheduleBarStore: @unchecked Sendable {
     }
 
     private func requiredProgress(parent: UUID, in tasks: [TaskSummary]) -> String? {
-        let required = tasks.filter { $0.parentID == parent && $0.necessary }
-        guard !required.isEmpty else { return nil }
-        let done = required.filter { $0.status == .completed }.count
-        return "\(done) of \(required.count) required subtasks completed"
+        requiredProgress(in: tasks.filter { $0.parentID == parent })
     }
 
     private func requiredProgress(in tasks: [TaskSummary]) -> String? {
-        let required = tasks.filter(\.necessary)
+        let required = tasks.filter { $0.necessary && $0.parentID != nil }
         guard !required.isEmpty else { return nil }
         let done = required.filter { $0.status == .completed }.count
-        return "\(done) of \(required.count) required items completed"
+        return "\(done) of \(required.count) required subtasks completed"
     }
 
     private func loadProjects(progressFrom tasks: [TaskSummary]) throws -> [ProjectSummary] {
@@ -2309,4 +2465,11 @@ public final class ScheduleBarStore: @unchecked Sendable {
         }
         return try decoder.decode(CaptureEvent.self, from: data)
     }
+}
+
+private struct CandidateRecord {
+    var id: UUID
+    var title: String
+    var projectID: UUID?
+    var date: ParsedDate?
 }
