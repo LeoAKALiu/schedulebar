@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "schedulebar": {
+      "command": "./bin/schedulebar-mcp",
+      "cwd": ".",
+      "args": []
+    }
+  }
+}

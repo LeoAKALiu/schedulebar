@@ -6,6 +6,16 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if session.state.candidateCount > 0 {
+            Text("Candidates (\(session.state.candidateCount))")
+            ForEach(session.state.candidates) { candidate in
+                Menu(candidate.title) {
+                    Button("Confirm") { session.confirmCandidate(candidate.id) }
+                    Button("Reject", role: .destructive) { session.rejectCandidate(candidate.id) }
+                }
+            }
+            Divider()
+        }
         if session.state.menuTasks.isEmpty {
             Text("No tasks yet")
         } else {

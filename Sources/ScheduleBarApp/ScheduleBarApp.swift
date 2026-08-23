@@ -15,8 +15,14 @@ struct ScheduleBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("ScheduleBar", systemImage: "checklist") {
+        MenuBarExtra {
             MenuBarView(session: session)
+        } label: {
+            if session.state.candidateCount > 0 {
+                Label("\(session.state.candidateCount)", systemImage: "checklist")
+            } else {
+                Label("ScheduleBar", systemImage: "checklist")
+            }
         }
         Window("ScheduleBar", id: "console") {
             ConsoleView(session: session)

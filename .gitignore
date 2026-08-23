@@ -7,4 +7,5 @@
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+Plugins/schedulebar/bin/
 

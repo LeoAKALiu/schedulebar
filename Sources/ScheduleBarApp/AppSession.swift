@@ -11,6 +11,7 @@ final class AppSession: ObservableObject {
 
     init(store: ScheduleBarStore) throws {
         self.store = store
+        _ = store.processInbox()
         self.state = try store.observableState()
     }
 
@@ -35,6 +36,26 @@ final class AppSession: ObservableObject {
             errorMessage = "Title is required."
         } catch {
             errorMessage = "Could not save the task."
+        }
+    }
+
+    func confirmCandidate(_ id: TaskSummary.ID) {
+        errorMessage = nil
+        do {
+            _ = try store.reviewCandidate(id, decision: .confirm)
+            state = try store.observableState()
+        } catch {
+            errorMessage = "Could not confirm the candidate."
+        }
+    }
+
+    func rejectCandidate(_ id: TaskSummary.ID) {
+        errorMessage = nil
+        do {
+            _ = try store.reviewCandidate(id, decision: .reject)
+            state = try store.observableState()
+        } catch {
+            errorMessage = "Could not reject the candidate."
         }
     }
 

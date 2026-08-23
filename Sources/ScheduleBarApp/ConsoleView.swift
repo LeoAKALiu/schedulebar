@@ -11,17 +11,22 @@ struct ConsoleView: View {
         NavigationSplitView {
             List(selection: $selectedSection) {
                 Text("All tasks").tag(ConsoleSection.all)
+                Text("Candidates (\(session.state.candidateCount))").tag(ConsoleSection.candidates)
             }
             .navigationSplitViewColumnWidth(min: 140, ideal: 160)
         } content: {
-            List(session.state.consoleTasks, selection: $selectedTaskID) { task in
+            List(listedItems, selection: $selectedTaskID) { task in
                 Text(task.title).tag(task.id)
             }
             .navigationTitle("Tasks")
             .navigationSplitViewColumnWidth(min: 180, ideal: 240)
         } detail: {
-            if let task = session.state.consoleTasks.first(where: { $0.id == selectedTaskID }) {
-                TaskDetailView(task: task)
+            if let task = listedItems.first(where: { $0.id == selectedTaskID }) {
+                TaskDetailView(task: task, isCandidate: selectedSection == .candidates) {
+                    session.confirmCandidate(task.id)
+                } reject: {
+                    session.rejectCandidate(task.id)
+                }
             } else {
                 Text("Select a task")
                     .foregroundStyle(.secondary)
@@ -31,18 +36,26 @@ struct ConsoleView: View {
         .onAppear {
             session.refresh()
             if selectedTaskID == nil {
-                selectedTaskID = session.state.consoleTasks.first?.id
+                selectedTaskID = listedItems.first?.id
             }
         }
+    }
+
+    private var listedItems: [TaskSummary] {
+        selectedSection == .candidates ? session.state.candidates : session.state.consoleTasks
     }
 }
 
 private enum ConsoleSection: Hashable {
     case all
+    case candidates
 }
 
 private struct TaskDetailView: View {
     let task: TaskSummary
+    var isCandidate = false
+    var confirm: () -> Void = {}
+    var reject: () -> Void = {}
 
     var body: some View {
         Form {
@@ -59,6 +72,10 @@ private struct TaskDetailView: View {
                 } else {
                     Text("—")
                 }
+            }
+            if isCandidate {
+                Button("Confirm", action: confirm)
+                Button("Reject", role: .destructive, action: reject)
             }
         }
         .formStyle(.grouped)

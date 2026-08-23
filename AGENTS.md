@@ -6,6 +6,7 @@ Use the Xcode already on disk. Do not change the global developer directory.
 make test        # swift test via DEVELOPER_DIR
 make xcode-test  # xcodebuild -scheme ScheduleBar-Package
 make run         # package .build/ScheduleBar.app and open it
+make plugin      # copy schedulebar-mcp into Plugins/schedulebar/bin
 ```
 
 Default `DEVELOPER_DIR` is `/Applications/Xcode-beta.app/Contents/Developer`.

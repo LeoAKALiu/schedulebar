@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "ScheduleBar", targets: ["ScheduleBar"]),
         .executable(name: "ScheduleBarApp", targets: ["ScheduleBarApp"]),
+        .executable(name: "schedulebar-mcp", targets: ["ScheduleBarMCP"]),
     ],
     targets: [
         .target(
@@ -20,6 +21,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "ScheduleBarApp",
+            dependencies: ["ScheduleBar"]
+        ),
+        .executableTarget(
+            name: "ScheduleBarMCP",
             dependencies: ["ScheduleBar"]
         ),
         .testTarget(

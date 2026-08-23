@@ -1,0 +1,28 @@
+{
+  "description": "ScheduleBar plugin hooks. Capture is performed by MCP; hooks must not block Codex.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/schedulebar-mcp\" hook",
+            "timeout": 5,
+            "statusMessage": "ScheduleBar session"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/schedulebar-mcp\" hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
