@@ -90,6 +90,15 @@ public final class ScheduleBarStore {
         case .linkSource(let taskID, let evidence):
             try requireHuman(authority)
             return try linkSource(taskID, evidence)
+        case .setBlockedBy(let taskID, let blockerID):
+            try requireHumanOrMain(authority)
+            return try setBlockedBy(taskID, blockerID)
+        case .removeBlockedBy(let taskID, let blockerID):
+            try requireHumanOrMain(authority)
+            return try removeBlockedBy(taskID, blockerID)
+        case .setPriority(let taskID, let priority):
+            try requireHuman(authority)
+            return try setPriority(taskID, priority)
         }
     }
 
@@ -260,7 +269,8 @@ public final class ScheduleBarStore {
                     origin: "capture",
                     projectID: mappedProject,
                     ownerName: event.ownerName,
-                    ownerKind: event.ownerKind
+                    ownerKind: event.ownerKind,
+                    priority: PriorityParser.parse(event) ?? .normal
                 )
                 taskID = created.taskID
                 if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
@@ -326,7 +336,8 @@ public final class ScheduleBarStore {
         id: UUID? = nil,
         kind: WorkKind = .task,
         parentID: UUID? = nil,
-        necessary: Bool = true
+        necessary: Bool = true,
+        priority: BusinessPriority = .normal
     ) throws -> Receipt {
         let id = id ?? UUID()
         let createdAt = iso(now())
@@ -335,8 +346,8 @@ public final class ScheduleBarStore {
         let ownerID = try upsertOwner(name: resolvedName, kind: resolvedKind)
         let stmt = try database.prepare(
             """
-            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id, owner_id, workflow_status, kind, parent_id, necessary)
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'notStarted', ?, ?, ?);
+            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id, owner_id, workflow_status, kind, parent_id, necessary, priority)
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'notStarted', ?, ?, ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -351,6 +362,7 @@ public final class ScheduleBarStore {
         database.bind(stmt, 9, kind.rawValue)
         database.bind(stmt, 10, parentID?.uuidString)
         sqlite3_bind_int(stmt, 11, necessary ? 1 : 0)
+        database.bind(stmt, 12, priority.rawValue)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -443,14 +455,14 @@ public final class ScheduleBarStore {
         let sql: String
         if projectID == nil {
             sql = """
-                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority
                 FROM tasks t
                 LEFT JOIN owners o ON o.id = t.owner_id
                 WHERE t.lifecycle = ? ORDER BY t.created_at DESC, t.title ASC;
                 """
         } else {
             sql = """
-                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority
                 FROM tasks t
                 LEFT JOIN owners o ON o.id = t.owner_id
                 WHERE t.lifecycle = ? AND t.project_id = ? ORDER BY t.created_at DESC, t.title ASC;
@@ -469,30 +481,34 @@ public final class ScheduleBarStore {
                   let title = database.column(stmt, 1)
             else { continue }
             let dates = try loadDates(for: id)
-            tasks.append(
-                TaskSummary(
-                    id: id,
-                    title: title,
-                    notes: database.column(stmt, 2),
-                    localPath: database.column(stmt, 3),
-                    projectID: database.column(stmt, 4).flatMap(UUID.init(uuidString:)),
-                    tags: try loadTags(for: id),
-                    datePhrase: dates.phrase,
-                    datePrecision: dates.precision,
-                    hardDeadline: dates.hardDeadline,
-                    plannedAt: dates.plannedAt,
-                    targetDate: dates.targetDate,
-                    followUpAt: dates.followUpAt,
-                    isOverdue: dates.isOverdue,
-                    ownerID: database.column(stmt, 5).flatMap(UUID.init(uuidString:)),
-                    ownerName: database.column(stmt, 7),
-                    ownerKind: database.column(stmt, 8).flatMap(OwnerKind.init(rawValue:)),
-                    status: database.column(stmt, 6).flatMap(WorkflowStatus.init(rawValue:)) ?? .notStarted,
-                    kind: database.column(stmt, 9).flatMap(WorkKind.init(rawValue:)) ?? .task,
-                    parentID: database.column(stmt, 10).flatMap(UUID.init(uuidString:)),
-                    necessary: sqlite3_column_int(stmt, 11) == 1
-                )
+            let blockers = try loadBlockerIDs(for: id)
+            var summary = TaskSummary(
+                id: id,
+                title: title,
+                notes: database.column(stmt, 2),
+                localPath: database.column(stmt, 3),
+                projectID: database.column(stmt, 4).flatMap(UUID.init(uuidString:)),
+                tags: try loadTags(for: id),
+                datePhrase: dates.phrase,
+                datePrecision: dates.precision,
+                hardDeadline: dates.hardDeadline,
+                plannedAt: dates.plannedAt,
+                targetDate: dates.targetDate,
+                followUpAt: dates.followUpAt,
+                isOverdue: dates.isOverdue,
+                ownerID: database.column(stmt, 5).flatMap(UUID.init(uuidString:)),
+                ownerName: database.column(stmt, 7),
+                ownerKind: database.column(stmt, 8).flatMap(OwnerKind.init(rawValue:)),
+                status: database.column(stmt, 6).flatMap(WorkflowStatus.init(rawValue:)) ?? .notStarted,
+                kind: database.column(stmt, 9).flatMap(WorkKind.init(rawValue:)) ?? .task,
+                parentID: database.column(stmt, 10).flatMap(UUID.init(uuidString:)),
+                necessary: sqlite3_column_int(stmt, 11) == 1,
+                priority: database.column(stmt, 12).flatMap(BusinessPriority.init(rawValue:)) ?? .normal,
+                blockedByIDs: blockers,
+                hasUnsatisfiedBlockers: try hasUnsatisfiedBlockers(blockers)
             )
+            summary.dateUrgency = DateParser.dateUrgency(for: summary, now: now())
+            tasks.append(summary)
         }
         return tasks
     }
@@ -667,6 +683,12 @@ public final class ScheduleBarStore {
 
     private func requireHuman(_ authority: SourceAuthority) throws {
         guard authority == .human else { throw ScheduleBarError.notPermitted }
+    }
+
+    private func requireHumanOrMain(_ authority: SourceAuthority) throws {
+        guard authority == .human || authority == .mainConversation else {
+            throw ScheduleBarError.notPermitted
+        }
     }
 
     private func iso(_ date: Date) -> String {
@@ -1011,6 +1033,9 @@ public final class ScheduleBarStore {
             targetID: taskID,
             table: "tasks"
         )
+        if resolved == .completed || resolved == .cancelled {
+            try refreshDependents(of: taskID)
+        }
         return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Status: \(resolved.rawValue)")
     }
 
@@ -1400,6 +1425,109 @@ public final class ScheduleBarStore {
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, id.uuidString)
         return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func setBlockedBy(_ taskID: UUID, _ blockerID: UUID) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        guard taskID != blockerID else { throw ScheduleBarError.notPermitted }
+        try requireTask(taskID)
+        try requireTask(blockerID)
+        let stmt = try database.prepare(
+            "INSERT OR IGNORE INTO task_blockers (task_id, blocker_id) VALUES (?, ?);"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        database.bind(stmt, 2, blockerID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try syncBlockedStatus(taskID)
+        try appendHistory(summary: "Blocked by \(blockerID.uuidString)", automatic: false, action: "set_blocked_by", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Blocked by dependency")
+    }
+
+    private func removeBlockedBy(_ taskID: UUID, _ blockerID: UUID) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let stmt = try database.prepare("DELETE FROM task_blockers WHERE task_id = ? AND blocker_id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        database.bind(stmt, 2, blockerID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try syncBlockedStatus(taskID)
+        try appendHistory(summary: "Removed blocker", automatic: false, action: "remove_blocked_by", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Removed blocker")
+    }
+
+    private func setPriority(_ taskID: UUID, _ priority: BusinessPriority) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try requireTask(taskID)
+        let stmt = try database.prepare("UPDATE tasks SET priority = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, priority.rawValue)
+        database.bind(stmt, 2, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else { throw ScheduleBarError.notFound }
+        try appendHistory(summary: "Priority: \(priority.rawValue)", automatic: false, action: "set_priority", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Priority: \(priority.rawValue)")
+    }
+
+    private func loadBlockerIDs(for taskID: UUID) throws -> [UUID] {
+        let stmt = try database.prepare(
+            "SELECT blocker_id FROM task_blockers WHERE task_id = ? ORDER BY rowid ASC;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        var ids: [UUID] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let text = database.column(stmt, 0), let id = UUID(uuidString: text) {
+                ids.append(id)
+            }
+        }
+        return ids
+    }
+
+    private func hasUnsatisfiedBlockers(_ blockerIDs: [UUID]) throws -> Bool {
+        for id in blockerIDs {
+            if try blockerIsUnsatisfied(id) { return true }
+        }
+        return false
+    }
+
+    private func blockerIsUnsatisfied(_ blockerID: UUID) throws -> Bool {
+        let stmt = try database.prepare("SELECT workflow_status, lifecycle FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, blockerID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        let status = database.column(stmt, 0).flatMap(WorkflowStatus.init(rawValue:)) ?? .notStarted
+        let lifecycle = database.column(stmt, 1) ?? "active"
+        if status == .completed || status == .cancelled { return false }
+        if lifecycle == "cancelled" || lifecycle == "undone" { return false }
+        return true
+    }
+
+    private func syncBlockedStatus(_ taskID: UUID) throws {
+        let unsatisfied = try hasUnsatisfiedBlockers(try loadBlockerIDs(for: taskID))
+        let current = try currentStatus(taskID)
+        if unsatisfied, current != .completed, current != .cancelled, current != .blocked {
+            try writeWorkflowStatus(taskID, .blocked)
+        } else if !unsatisfied, current == .blocked {
+            try writeWorkflowStatus(taskID, .notStarted)
+        }
+    }
+
+    private func refreshDependents(of blockerID: UUID) throws {
+        let stmt = try database.prepare("SELECT task_id FROM task_blockers WHERE blocker_id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, blockerID.uuidString)
+        var dependents: [UUID] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let text = database.column(stmt, 0), let id = UUID(uuidString: text) {
+                dependents.append(id)
+            }
+        }
+        for id in dependents {
+            try syncBlockedStatus(id)
+        }
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

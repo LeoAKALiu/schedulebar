@@ -134,6 +134,16 @@ final class SQLiteDatabase {
         try? exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';")
         try? exec("ALTER TABLE tasks ADD COLUMN parent_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN necessary INTEGER NOT NULL DEFAULT 1;")
+        try? exec("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';")
+        try exec(
+            """
+            CREATE TABLE IF NOT EXISTS task_blockers (
+                task_id TEXT NOT NULL,
+                blocker_id TEXT NOT NULL,
+                PRIMARY KEY (task_id, blocker_id)
+            );
+            """
+        )
         try exec(
             """
             CREATE TABLE IF NOT EXISTS plans (

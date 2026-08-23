@@ -180,6 +180,11 @@ private struct TaskDetailView: View {
             LabeledContent("Owner", value: task.ownerName ?? "—")
             LabeledContent("Status", value: task.status.rawValue)
             LabeledContent("Kind", value: task.kind.rawValue)
+            LabeledContent("Priority", value: task.priority.rawValue)
+            LabeledContent("Date urgency", value: task.dateUrgency.rawValue)
+            if !task.blockedByIDs.isEmpty {
+                LabeledContent("Blocked by", value: task.blockedByIDs.map(\.uuidString).joined(separator: ", "))
+            }
             if let progress = task.progressSummary {
                 LabeledContent("Progress", value: progress)
             }
@@ -212,6 +217,10 @@ private struct TaskDetailView: View {
                 Button("Blocked") { session.setStatus(task.id, .blocked) }
                 Button("Pending acceptance") { session.setStatus(task.id, .pendingAcceptance) }
                 Button("Complete") { session.setStatus(task.id, .completed) }
+                Button("Priority: low") { session.setPriority(task.id, .low) }
+                Button("Priority: normal") { session.setPriority(task.id, .normal) }
+                Button("Priority: high") { session.setPriority(task.id, .high) }
+                Button("Priority: critical") { session.setPriority(task.id, .critical) }
                 ForEach(session.state.owners) { owner in
                     Button("Assign \(owner.name)") { session.setOwner(task.id, owner) }
                 }

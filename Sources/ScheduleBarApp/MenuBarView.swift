@@ -80,6 +80,11 @@ private struct TaskStatusMenu: View {
             Button("Complete") { session.setStatus(task.id, .completed) }
             Button("Cancel", role: .destructive) { session.setStatus(task.id, .cancelled) }
             Divider()
+            Button("Priority: low") { session.setPriority(task.id, .low) }
+            Button("Priority: normal") { session.setPriority(task.id, .normal) }
+            Button("Priority: high") { session.setPriority(task.id, .high) }
+            Button("Priority: critical") { session.setPriority(task.id, .critical) }
+            Divider()
             ForEach(session.state.owners) { owner in
                 Button(owner.name) { session.setOwner(task.id, owner) }
             }

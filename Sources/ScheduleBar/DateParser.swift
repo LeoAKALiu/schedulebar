@@ -123,6 +123,17 @@ enum DateParser {
         task.hardDeadline ?? task.targetDate ?? task.plannedAt ?? task.followUpAt
     }
 
+    static func dateUrgency(for task: TaskSummary, now: Date) -> DateUrgency {
+        if task.isOverdue { return .overdue }
+        switch menuBucket(for: task, now: now) {
+        case .today: return .today
+        case .nextSevenDays: return .soon
+        case .overdue: return .overdue
+        case nil:
+            return groupingInstant(for: task) == nil ? .none : .later
+        }
+    }
+
     private static func resolved(
         kind: DateKind,
         phrase: String,

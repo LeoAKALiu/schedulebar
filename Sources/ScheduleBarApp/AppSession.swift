@@ -126,6 +126,16 @@ final class AppSession: ObservableObject {
         refresh()
     }
 
+    func setPriority(_ id: TaskSummary.ID, _ priority: BusinessPriority) {
+        _ = try? store.apply(.setPriority(id, priority), authority: .human)
+        refresh()
+    }
+
+    func setBlockedBy(_ id: TaskSummary.ID, _ blockerID: UUID) {
+        _ = try? store.apply(.setBlockedBy(id, blockerID), authority: .human)
+        refresh()
+    }
+
     func refresh() {
         do {
             _ = store.processDueReminders()

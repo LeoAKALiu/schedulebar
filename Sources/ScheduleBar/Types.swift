@@ -73,6 +73,21 @@ public enum OwnerKind: String, Codable, Equatable, Sendable {
     case agent
 }
 
+public enum BusinessPriority: String, Codable, Equatable, Sendable {
+    case low
+    case normal
+    case high
+    case critical
+}
+
+public enum DateUrgency: String, Codable, Equatable, Sendable {
+    case none
+    case later
+    case soon
+    case today
+    case overdue
+}
+
 public enum WorkflowStatus: String, Codable, Equatable, Sendable {
     case notStarted
     case inProgress
@@ -131,6 +146,9 @@ public enum InputEvent: Equatable, Sendable {
     case acceptPlan(UUID, [UUID])
     case rejectPlan(UUID)
     case linkSource(UUID, SourceEvidence)
+    case setBlockedBy(UUID, UUID)
+    case removeBlockedBy(UUID, UUID)
+    case setPriority(UUID, BusinessPriority)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -223,6 +241,10 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var parentID: UUID?
     public var necessary: Bool
     public var progressSummary: String?
+    public var priority: BusinessPriority
+    public var dateUrgency: DateUrgency
+    public var blockedByIDs: [UUID]
+    public var hasUnsatisfiedBlockers: Bool
 
     public init(
         id: UUID,
@@ -245,7 +267,11 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         kind: WorkKind = .task,
         parentID: UUID? = nil,
         necessary: Bool = true,
-        progressSummary: String? = nil
+        progressSummary: String? = nil,
+        priority: BusinessPriority = .normal,
+        dateUrgency: DateUrgency = .none,
+        blockedByIDs: [UUID] = [],
+        hasUnsatisfiedBlockers: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -268,6 +294,10 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.parentID = parentID
         self.necessary = necessary
         self.progressSummary = progressSummary
+        self.priority = priority
+        self.dateUrgency = dateUrgency
+        self.blockedByIDs = blockedByIDs
+        self.hasUnsatisfiedBlockers = hasUnsatisfiedBlockers
     }
 }
 
