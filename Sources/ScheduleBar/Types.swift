@@ -123,6 +123,26 @@ public enum DatePrecision: String, Codable, Equatable, Sendable {
     case vague
 }
 
+public enum RecurrenceRule: Equatable, Sendable, Codable {
+    case daily
+    case weekly(weekday: Int)
+    case monthly(day: Int)
+}
+
+public struct RecurrenceSeries: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var title: String
+    public var rule: RecurrenceRule
+    public var isStopped: Bool
+
+    public init(id: UUID, title: String, rule: RecurrenceRule, isStopped: Bool) {
+        self.id = id
+        self.title = title
+        self.rule = rule
+        self.isStopped = isStopped
+    }
+}
+
 public enum InputEvent: Equatable, Sendable {
     case quickAdd(QuickAddInput)
     case capture(CaptureEvent)
@@ -149,6 +169,8 @@ public enum InputEvent: Equatable, Sendable {
     case setBlockedBy(UUID, UUID)
     case removeBlockedBy(UUID, UUID)
     case setPriority(UUID, BusinessPriority)
+    case setRecurrence(UUID, RecurrenceRule)
+    case stopRecurrence(UUID)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -245,6 +267,8 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var dateUrgency: DateUrgency
     public var blockedByIDs: [UUID]
     public var hasUnsatisfiedBlockers: Bool
+    public var seriesID: UUID?
+    public var occurrenceDate: Date?
 
     public init(
         id: UUID,
@@ -271,7 +295,9 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         priority: BusinessPriority = .normal,
         dateUrgency: DateUrgency = .none,
         blockedByIDs: [UUID] = [],
-        hasUnsatisfiedBlockers: Bool = false
+        hasUnsatisfiedBlockers: Bool = false,
+        seriesID: UUID? = nil,
+        occurrenceDate: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -298,6 +324,8 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.dateUrgency = dateUrgency
         self.blockedByIDs = blockedByIDs
         self.hasUnsatisfiedBlockers = hasUnsatisfiedBlockers
+        self.seriesID = seriesID
+        self.occurrenceDate = occurrenceDate
     }
 }
 
@@ -438,6 +466,7 @@ public struct ObservableState: Equatable, Sendable {
     public var owners: [OwnerSummary]
     public var plans: [PlanDraft]
     public var milestones: [TaskSummary]
+    public var recurrences: [RecurrenceSeries]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -463,7 +492,8 @@ public struct ObservableState: Equatable, Sendable {
         waitingOnOthers: [TaskSummary] = [],
         owners: [OwnerSummary] = [],
         plans: [PlanDraft] = [],
-        milestones: [TaskSummary] = []
+        milestones: [TaskSummary] = [],
+        recurrences: [RecurrenceSeries] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -479,6 +509,7 @@ public struct ObservableState: Equatable, Sendable {
         self.owners = owners
         self.plans = plans
         self.milestones = milestones
+        self.recurrences = recurrences
     }
 }
 

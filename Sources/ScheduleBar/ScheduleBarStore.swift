@@ -99,6 +99,12 @@ public final class ScheduleBarStore {
         case .setPriority(let taskID, let priority):
             try requireHuman(authority)
             return try setPriority(taskID, priority)
+        case .setRecurrence(let taskID, let rule):
+            try requireHuman(authority)
+            return try setRecurrence(taskID, rule)
+        case .stopRecurrence(let seriesID):
+            try requireHuman(authority)
+            return try stopRecurrence(seriesID)
         }
     }
 
@@ -158,8 +164,15 @@ public final class ScheduleBarStore {
             waitingOnOthers: tasks.filter(isWaitingOnOther),
             owners: try loadOwners(),
             plans: try loadPlans(),
-            milestones: tasks.filter { $0.kind == .milestone }
+            milestones: tasks.filter { $0.kind == .milestone },
+            recurrences: try loadRecurrences()
         )
+    }
+
+    public func processRecurrences() -> Int {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        return (try? generateRecurrenceInstances()) ?? 0
     }
 
     public func sourceLinks(for taskID: UUID) throws -> [SourceEvidence] {
@@ -259,6 +272,10 @@ public final class ScheduleBarStore {
             if classified == .recorded, parsedDate?.isVague == true {
                 classified = .candidate
             }
+            let recurrence = RecurrenceParser.parse(event)
+            if classified == .recorded, recurrence == .vague || recurrence == .complex {
+                classified = .candidate
+            }
             var taskID: UUID?
             switch classified {
             case .recorded:
@@ -275,6 +292,9 @@ public final class ScheduleBarStore {
                 taskID = created.taskID
                 if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
                     try attachDate(parsedDate, to: createdID)
+                }
+                if case .rule(let rule) = recurrence, let createdID = created.taskID {
+                    _ = try attachRecurrence(to: createdID, rule: rule)
                 }
                 try insertEvidence(taskID: created.taskID, event: event)
                 try appendHistory(
@@ -337,7 +357,9 @@ public final class ScheduleBarStore {
         kind: WorkKind = .task,
         parentID: UUID? = nil,
         necessary: Bool = true,
-        priority: BusinessPriority = .normal
+        priority: BusinessPriority = .normal,
+        seriesID: UUID? = nil,
+        occurrence: String? = nil
     ) throws -> Receipt {
         let id = id ?? UUID()
         let createdAt = iso(now())
@@ -346,8 +368,8 @@ public final class ScheduleBarStore {
         let ownerID = try upsertOwner(name: resolvedName, kind: resolvedKind)
         let stmt = try database.prepare(
             """
-            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id, owner_id, workflow_status, kind, parent_id, necessary, priority)
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'notStarted', ?, ?, ?, ?);
+            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id, owner_id, workflow_status, kind, parent_id, necessary, priority, series_id, occurrence)
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'notStarted', ?, ?, ?, ?, ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -363,6 +385,8 @@ public final class ScheduleBarStore {
         database.bind(stmt, 10, parentID?.uuidString)
         sqlite3_bind_int(stmt, 11, necessary ? 1 : 0)
         database.bind(stmt, 12, priority.rawValue)
+        database.bind(stmt, 13, seriesID?.uuidString)
+        database.bind(stmt, 14, occurrence)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -455,14 +479,14 @@ public final class ScheduleBarStore {
         let sql: String
         if projectID == nil {
             sql = """
-                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority, t.series_id, t.occurrence
                 FROM tasks t
                 LEFT JOIN owners o ON o.id = t.owner_id
                 WHERE t.lifecycle = ? ORDER BY t.created_at DESC, t.title ASC;
                 """
         } else {
             sql = """
-                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind, t.kind, t.parent_id, t.necessary, t.priority, t.series_id, t.occurrence
                 FROM tasks t
                 LEFT JOIN owners o ON o.id = t.owner_id
                 WHERE t.lifecycle = ? AND t.project_id = ? ORDER BY t.created_at DESC, t.title ASC;
@@ -505,7 +529,9 @@ public final class ScheduleBarStore {
                 necessary: sqlite3_column_int(stmt, 11) == 1,
                 priority: database.column(stmt, 12).flatMap(BusinessPriority.init(rawValue:)) ?? .normal,
                 blockedByIDs: blockers,
-                hasUnsatisfiedBlockers: try hasUnsatisfiedBlockers(blockers)
+                hasUnsatisfiedBlockers: try hasUnsatisfiedBlockers(blockers),
+                seriesID: database.column(stmt, 13).flatMap(UUID.init(uuidString:)),
+                occurrenceDate: database.column(stmt, 14).flatMap(RecurrenceParser.date(fromOccurrence:))
             )
             summary.dateUrgency = DateParser.dateUrgency(for: summary, now: now())
             tasks.append(summary)
@@ -1528,6 +1554,248 @@ public final class ScheduleBarStore {
         for id in dependents {
             try syncBlockedStatus(id)
         }
+    }
+
+    private func setRecurrence(_ taskID: UUID, _ rule: RecurrenceRule) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let seriesID = try attachRecurrence(to: taskID, rule: rule)
+        try appendHistory(summary: "Set recurrence", automatic: false, action: "set_recurrence", targetID: seriesID, table: "recurrences")
+        return Receipt(outcome: .recorded, taskID: seriesID, summaryLine: "Set recurrence")
+    }
+
+    private func stopRecurrence(_ seriesID: UUID) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let stmt = try database.prepare("UPDATE recurrences SET stopped = 1 WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, seriesID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else { throw ScheduleBarError.notFound }
+        try appendHistory(summary: "Stopped recurrence", automatic: false, action: "stop_recurrence", targetID: seriesID, table: "recurrences")
+        return Receipt(outcome: .recorded, taskID: seriesID, summaryLine: "Stopped recurrence")
+    }
+
+    private func attachRecurrence(to taskID: UUID, rule: RecurrenceRule) throws -> UUID {
+        try requireTask(taskID)
+        let existing = try database.prepare("SELECT series_id FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(existing) }
+        database.bind(existing, 1, taskID.uuidString)
+        if sqlite3_step(existing) == SQLITE_ROW, let seriesText = database.column(existing, 0), let seriesID = UUID(uuidString: seriesText) {
+            _ = try generateRecurrenceInstances()
+            return seriesID
+        }
+        let calendar = DateParser.calendar()
+        let dates = try loadDates(for: taskID)
+        let anchor = dates.hardDeadline ?? dates.plannedAt ?? dates.targetDate ?? now()
+        guard let first = RecurrenceParser.firstOccurrence(rule: rule, from: calendar.startOfDay(for: anchor), calendar: calendar) else {
+            throw ScheduleBarError.storeUnavailable
+        }
+        let meta = try loadTaskMeta(taskID)
+        let encoded = RecurrenceParser.encode(rule)
+        let seriesID = UUID()
+        let stmt = try database.prepare(
+            """
+            INSERT INTO recurrences (id, origin_task_id, title, rule, weekday, month_day, owner_id, project_id, anchor_at, stopped)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, seriesID.uuidString)
+        database.bind(stmt, 2, taskID.uuidString)
+        database.bind(stmt, 3, meta.title)
+        database.bind(stmt, 4, encoded.kind)
+        if let weekday = encoded.weekday {
+            sqlite3_bind_int(stmt, 5, Int32(weekday))
+        } else {
+            sqlite3_bind_null(stmt, 5)
+        }
+        if let day = encoded.day {
+            sqlite3_bind_int(stmt, 6, Int32(day))
+        } else {
+            sqlite3_bind_null(stmt, 6)
+        }
+        database.bind(stmt, 7, meta.ownerID?.uuidString)
+        database.bind(stmt, 8, meta.projectID?.uuidString)
+        database.bind(stmt, 9, iso(first))
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try registerInstance(seriesID: seriesID, occurrence: RecurrenceParser.occurrenceKey(first, calendar: calendar), taskID: taskID)
+        try stampInstance(taskID: taskID, seriesID: seriesID, occurrence: first)
+        _ = try generateRecurrenceInstances()
+        return seriesID
+    }
+
+    private func generateRecurrenceInstances() throws -> Int {
+        let calendar = DateParser.calendar()
+        let end = calendar.startOfDay(for: now())
+        let stmt = try database.prepare(
+            """
+            SELECT id, origin_task_id, title, rule, weekday, month_day, owner_id, project_id, anchor_at
+            FROM recurrences WHERE stopped = 0;
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        var created = 0
+        var series: [(
+            id: UUID,
+            origin: UUID,
+            title: String,
+            rule: RecurrenceRule,
+            ownerID: UUID?,
+            projectID: UUID?,
+            anchor: Date
+        )] = []
+        let formatter = ISO8601DateFormatter()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let originText = database.column(stmt, 1),
+                  let origin = UUID(uuidString: originText),
+                  let title = database.column(stmt, 2),
+                  let kind = database.column(stmt, 3)
+            else { continue }
+            let weekday = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 4))
+            let monthDay = sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 5))
+            guard let rule = RecurrenceParser.decode(kind: kind, weekday: weekday, day: monthDay) else { continue }
+            let ownerID = database.column(stmt, 6).flatMap(UUID.init(uuidString:))
+            let projectID = database.column(stmt, 7).flatMap(UUID.init(uuidString:))
+            let anchor = database.column(stmt, 8).flatMap(formatter.date(from:)) ?? end
+            series.append((id, origin, title, rule, ownerID, projectID, calendar.startOfDay(for: anchor)))
+        }
+        for item in series {
+            var cursor = item.anchor
+            var steps = 0
+            while cursor <= end, steps < 400 {
+                if RecurrenceParser.matches(item.rule, day: cursor, calendar: calendar) {
+                    let key = RecurrenceParser.occurrenceKey(cursor, calendar: calendar)
+                    if try !instanceExists(seriesID: item.id, occurrence: key) {
+                        let owner = try ownerNameKind(item.ownerID)
+                        let receipt = try insertTask(
+                            title: item.title,
+                            notes: nil,
+                            localPath: nil,
+                            origin: "recurrence",
+                            projectID: item.projectID,
+                            ownerName: owner?.name,
+                            ownerKind: owner?.kind,
+                            seriesID: item.id,
+                            occurrence: key
+                        )
+                        if let taskID = receipt.taskID {
+                            try registerInstance(seriesID: item.id, occurrence: key, taskID: taskID)
+                            try stampInstance(taskID: taskID, seriesID: item.id, occurrence: cursor)
+                            try copySourceLinks(from: item.origin, to: taskID)
+                            created += 1
+                        }
+                    }
+                }
+                guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+                cursor = next
+                steps += 1
+            }
+        }
+        return created
+    }
+
+    private func stampInstance(taskID: UUID, seriesID: UUID, occurrence: Date) throws {
+        let calendar = DateParser.calendar()
+        let key = RecurrenceParser.occurrenceKey(occurrence, calendar: calendar)
+        let stmt = try database.prepare("UPDATE tasks SET series_id = ?, occurrence = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, seriesID.uuidString)
+        database.bind(stmt, 2, key)
+        database.bind(stmt, 3, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try attachDate(
+            ParsedDate(
+                kind: .planned,
+                phrase: key,
+                anchor: now(),
+                instant: occurrence,
+                precision: .allDay,
+                status: .resolved
+            ),
+            to: taskID
+        )
+    }
+
+    private func registerInstance(seriesID: UUID, occurrence: String, taskID: UUID) throws {
+        let stmt = try database.prepare(
+            "INSERT OR IGNORE INTO recurrence_instances (series_id, occurrence, task_id) VALUES (?, ?, ?);"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, seriesID.uuidString)
+        database.bind(stmt, 2, occurrence)
+        database.bind(stmt, 3, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+    }
+
+    private func instanceExists(seriesID: UUID, occurrence: String) throws -> Bool {
+        let stmt = try database.prepare(
+            "SELECT task_id FROM recurrence_instances WHERE series_id = ? AND occurrence = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, seriesID.uuidString)
+        database.bind(stmt, 2, occurrence)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func loadTaskMeta(_ taskID: UUID) throws -> (title: String, ownerID: UUID?, projectID: UUID?) {
+        let stmt = try database.prepare("SELECT title, owner_id, project_id FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let title = database.column(stmt, 0) else {
+            throw ScheduleBarError.notFound
+        }
+        return (
+            title,
+            database.column(stmt, 1).flatMap(UUID.init(uuidString:)),
+            database.column(stmt, 2).flatMap(UUID.init(uuidString:))
+        )
+    }
+
+    private func ownerNameKind(_ ownerID: UUID?) throws -> (name: String, kind: OwnerKind)? {
+        guard let ownerID else { return nil }
+        let stmt = try database.prepare("SELECT name, kind FROM owners WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, ownerID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let name = database.column(stmt, 0),
+              let kind = database.column(stmt, 1).flatMap(OwnerKind.init(rawValue:))
+        else { return nil }
+        return (name, kind)
+    }
+
+    private func copySourceLinks(from origin: UUID, to taskID: UUID) throws {
+        for evidence in try loadSourceLinks(for: origin) {
+            try insertSourceLink(taskID: taskID, evidence: evidence)
+        }
+    }
+
+    private func loadRecurrences() throws -> [RecurrenceSeries] {
+        let stmt = try database.prepare(
+            "SELECT id, title, rule, weekday, month_day, stopped FROM recurrences ORDER BY rowid ASC;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        var items: [RecurrenceSeries] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let title = database.column(stmt, 1),
+                  let kind = database.column(stmt, 2)
+            else { continue }
+            let weekday = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 3))
+            let monthDay = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, 4))
+            guard let rule = RecurrenceParser.decode(kind: kind, weekday: weekday, day: monthDay) else { continue }
+            items.append(
+                RecurrenceSeries(
+                    id: id,
+                    title: title,
+                    rule: rule,
+                    isStopped: sqlite3_column_int(stmt, 5) == 1
+                )
+            )
+        }
+        return items
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

@@ -17,6 +17,7 @@ struct ConsoleView: View {
                 Text("History").tag(ConsoleSection.history)
                 Text("Plans (\(session.state.plans.count))").tag(ConsoleSection.plans)
                 Text("Milestones (\(session.state.milestones.count))").tag(ConsoleSection.milestones)
+                Text("Recurrence (\(session.state.recurrences.count))").tag(ConsoleSection.recurrence)
                 ForEach(session.state.projects) { project in
                     Text(project.progressSummary.map { "\(project.name) — \($0)" } ?? project.name)
                         .tag(ConsoleSection.project(project.id))
@@ -37,6 +38,19 @@ struct ConsoleView: View {
                     }
                 }
                 .navigationTitle("History")
+            } else if selectedSection == .recurrence {
+                List(session.state.recurrences) { series in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(series.title)
+                        Text(series.isStopped ? "Stopped" : "Active")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !series.isStopped {
+                            Button("Stop") { session.stopRecurrence(series.id) }
+                        }
+                    }
+                }
+                .navigationTitle("Recurrence")
             } else if selectedSection == .plans {
                 List(session.state.plans) { plan in
                     VStack(alignment: .leading, spacing: 6) {
@@ -104,7 +118,7 @@ struct ConsoleView: View {
         case .project(let id):
             return session.state.consoleTasks.filter { $0.projectID == id }
         case .milestones: return session.state.milestones
-        case .all, .history, .pending, .plans:
+        case .all, .history, .pending, .plans, .recurrence:
             return session.state.consoleTasks
         }
     }
@@ -128,6 +142,7 @@ private enum ConsoleSection: Hashable {
     case pending(String)
     case plans
     case milestones
+    case recurrence
 }
 
 private struct DirectoryReviewView: View {
@@ -187,6 +202,9 @@ private struct TaskDetailView: View {
             }
             if let progress = task.progressSummary {
                 LabeledContent("Progress", value: progress)
+            }
+            if task.seriesID != nil {
+                LabeledContent("Occurrence", value: task.occurrenceDate?.formatted(date: .abbreviated, time: .omitted) ?? "—")
             }
             LabeledContent("Notes", value: task.notes ?? "—")
             if let phrase = task.datePhrase {

@@ -135,6 +135,30 @@ final class SQLiteDatabase {
         try? exec("ALTER TABLE tasks ADD COLUMN parent_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN necessary INTEGER NOT NULL DEFAULT 1;")
         try? exec("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';")
+        try? exec("ALTER TABLE tasks ADD COLUMN series_id TEXT;")
+        try? exec("ALTER TABLE tasks ADD COLUMN occurrence TEXT;")
+        try exec(
+            """
+            CREATE TABLE IF NOT EXISTS recurrences (
+                id TEXT PRIMARY KEY NOT NULL,
+                origin_task_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                rule TEXT NOT NULL,
+                weekday INTEGER,
+                month_day INTEGER,
+                owner_id TEXT,
+                project_id TEXT,
+                anchor_at TEXT NOT NULL,
+                stopped INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS recurrence_instances (
+                series_id TEXT NOT NULL,
+                occurrence TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                PRIMARY KEY (series_id, occurrence)
+            );
+            """
+        )
         try exec(
             """
             CREATE TABLE IF NOT EXISTS task_blockers (

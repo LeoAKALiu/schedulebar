@@ -13,6 +13,7 @@ final class AppSession: ObservableObject {
         self.store = store
         _ = store.processInbox()
         _ = store.processDueReminders()
+        _ = store.processRecurrences()
         self.state = try store.observableState()
         startReminderPolling()
     }
@@ -136,9 +137,15 @@ final class AppSession: ObservableObject {
         refresh()
     }
 
+    func stopRecurrence(_ id: UUID) {
+        _ = try? store.apply(.stopRecurrence(id), authority: .human)
+        refresh()
+    }
+
     func refresh() {
         do {
             _ = store.processDueReminders()
+            _ = store.processRecurrences()
             state = try store.observableState()
             errorMessage = nil
         } catch {
