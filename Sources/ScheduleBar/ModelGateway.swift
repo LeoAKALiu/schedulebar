@@ -60,6 +60,9 @@ public final class ScriptedModelGateway: ModelGateway, @unchecked Sendable {
 }
 
 public struct HTTPModelGateway: ModelGateway {
+    public static let baseURLDefaultsKey = "SCHEDULEBAR_MODEL_BASE_URL"
+    public static let modelDefaultsKey = "SCHEDULEBAR_MODEL_NAME"
+
     public var baseURL: URL
     public var model: String
     public var session: URLSession
@@ -75,6 +78,20 @@ public struct HTTPModelGateway: ModelGateway {
         self.model = model
         self.session = session
         self.timeout = timeout
+    }
+
+    /// User-configured compatible API endpoint (issue #13: the gateway must
+    /// adapt to a user-chosen API shape without binding domain behavior).
+    public static func userConfigured(defaults: UserDefaults = .standard) -> HTTPModelGateway {
+        let environment = ProcessInfo.processInfo.environment
+        let baseURL = defaults.string(forKey: baseURLDefaultsKey).flatMap(URL.init(string:))
+            ?? environment["SCHEDULEBAR_MODEL_BASE_URL"].flatMap(URL.init(string:))
+        let model = defaults.string(forKey: modelDefaultsKey)
+            ?? environment["SCHEDULEBAR_MODEL_NAME"]
+        return HTTPModelGateway(
+            baseURL: baseURL ?? URL(string: "https://api.deepseek.com")!,
+            model: model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "deepseek-chat"
+        )
     }
 
     public func detectMissedCandidates(_ request: MissedCandidateRequest, apiKey: String?) async -> ModelMissResult {

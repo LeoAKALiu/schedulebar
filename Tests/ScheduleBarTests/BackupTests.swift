@@ -49,7 +49,7 @@ import Testing
     let url = uniqueBackupStoreURL()
     let store = try ScheduleBarStore(storeURL: url)
     try TestFixtures.mapDefaultDirectory(store)
-    var event = CaptureEvent(
+    let event = CaptureEvent(
         idempotencyKey: "decoy-1",
         title: "Ship notes",
         authority: .mainConversation,
@@ -60,12 +60,24 @@ import Testing
         triggerPhrase: "record as task",
         excerpt: "record as task ship notes"
     )
-    event.conversation = "FULL CHAT DUMP with every prior turn"
-    event.attachments = "private.pdf binary blob"
-    event.toolOutput = "tool stdout from apply_patch"
-    event.reasoning = "hidden chain of thought"
-    event.apiKey = "sk-secretTESTKEY999"
-    _ = try store.apply(.capture(event))
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    var payload = try #require(try JSONSerialization.jsonObject(with: encoder.encode(event)) as? [String: Any])
+    payload["conversation"] = "FULL CHAT DUMP with every prior turn"
+    payload["attachments"] = "private.pdf binary blob"
+    payload["toolOutput"] = "tool stdout from apply_patch"
+    payload["reasoning"] = "hidden chain of thought"
+    payload["apiKey"] = "sk-secretTESTKEY999"
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let decoded = try decoder.decode(
+        CaptureEvent.self,
+        from: JSONSerialization.data(withJSONObject: payload)
+    )
+    let retainedPayload = String(decoding: try encoder.encode(decoded), as: UTF8.self)
+    #expect(retainedPayload.contains("FULL CHAT DUMP") == false)
+    #expect(retainedPayload.contains("sk-secretTESTKEY999") == false)
+    _ = try store.apply(.capture(decoded))
 
     let sqliteText = sqliteHaystack(url)
     #expect(sqliteText.contains("FULL CHAT DUMP") == false)

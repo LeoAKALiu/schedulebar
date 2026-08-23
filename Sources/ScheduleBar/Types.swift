@@ -33,11 +33,6 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
     public var dateKind: DateKind?
     public var ownerName: String?
     public var ownerKind: OwnerKind?
-    public var conversation: String?
-    public var attachments: String?
-    public var toolOutput: String?
-    public var reasoning: String?
-    public var apiKey: String?
 
     public init(
         idempotencyKey: String,
@@ -69,11 +64,6 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         let owner = ownerName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.ownerName = (owner?.isEmpty == false) ? owner : nil
         self.ownerKind = ownerKind
-        self.conversation = nil
-        self.attachments = nil
-        self.toolOutput = nil
-        self.reasoning = nil
-        self.apiKey = nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -97,11 +87,6 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         dateKind = try container.decodeIfPresent(DateKind.self, forKey: .dateKind)
         ownerName = try container.decodeIfPresent(String.self, forKey: .ownerName)
         ownerKind = try container.decodeIfPresent(OwnerKind.self, forKey: .ownerKind)
-        conversation = nil
-        attachments = nil
-        toolOutput = nil
-        reasoning = nil
-        apiKey = nil
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -200,6 +185,7 @@ public struct RecurrenceSeries: Equatable, Sendable, Identifiable {
 
 public enum InputEvent: Equatable, Sendable {
     case quickAdd(QuickAddInput)
+    case editTask(UUID, QuickAddInput)
     case capture(CaptureEvent)
     case reviewCandidate(UUID, CandidateDecision)
     case cancel(UUID)
@@ -432,19 +418,22 @@ public struct SourceEvidence: Equatable, Sendable {
     public var triggerPhrase: String
     public var excerpt: String
     public var workingDirectory: String
+    public var messageTime: Date?
 
     public init(
         threadID: String,
         turnID: String,
         triggerPhrase: String,
         excerpt: String,
-        workingDirectory: String
+        workingDirectory: String,
+        messageTime: Date? = nil
     ) {
         self.threadID = threadID
         self.turnID = turnID
         self.triggerPhrase = String(triggerPhrase.prefix(200))
         self.excerpt = String(excerpt.prefix(280))
         self.workingDirectory = workingDirectory
+        self.messageTime = messageTime
     }
 }
 

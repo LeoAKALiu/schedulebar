@@ -1,7 +1,7 @@
 {
   "name": "schedulebar",
   "version": "0.1.0",
-  "description": "Capture explicit Codex 'record as task' requests into ScheduleBar.",
+  "description": "Capture Codex commitments and explicit task requests into ScheduleBar.",
   "author": {
     "name": "ScheduleBar"
   },

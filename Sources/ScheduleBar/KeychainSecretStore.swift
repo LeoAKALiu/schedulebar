@@ -1,12 +1,13 @@
 import Foundation
-import ScheduleBar
 import Security
 
-final class KeychainSecretStore: SecretStore, @unchecked Sendable {
+public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
+    public init() {}
+
     private let service = "app.schedulebar"
     private let account = "deepseek-api-key"
 
-    func saveAPIKey(_ key: String) {
+    public func saveAPIKey(_ key: String) {
         deleteAPIKey()
         let payload = Data(key.utf8)
         let query: [String: Any] = [
@@ -19,7 +20,7 @@ final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    func loadAPIKey() -> String? {
+    public func loadAPIKey() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -33,7 +34,7 @@ final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         return String(data: data, encoding: .utf8)
     }
 
-    func deleteAPIKey() {
+    public func deleteAPIKey() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

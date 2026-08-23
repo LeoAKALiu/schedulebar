@@ -18,6 +18,33 @@ struct ParsedDate: Equatable, Sendable {
 
 enum DateParser {
     static let timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    static let vagueTokens = [
+        "soon", "later", "someday", "sometime", "whenever", "eventually", "shortly", "asap",
+        "尽快", "之后", "以后", "有空", "改天", "最近", "回头", "有时间",
+    ]
+
+    static func firstSupportedPhrase(in text: String) -> String? {
+        let englishSimple = ["today", "tomorrow", "yesterday"] + vagueTokens.filter { $0.allSatisfy(\.isASCII) }
+        let chineseSimple = ["今天", "明天", "昨天", "后天"] + vagueTokens.filter { !$0.allSatisfy(\.isASCII) }
+        let patterns = [
+            #"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b"#,
+            #"\b\d{4}-\d{2}-\d{2}\b"#,
+            #"\b(?:next|this)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#,
+            #"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#,
+            #"(?:下周[一二三四五六日天]|这周[一二三四五六日天]|周[一二三四五六日天]|星期[一二三四五六日天])"#,
+            "\\b(?:\(englishSimple.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")))\\b",
+            "(?:\(chineseSimple.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")))",
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  let swiftRange = Range(match.range, in: text)
+            else { continue }
+            return String(text[swiftRange])
+        }
+        return nil
+    }
 
     static func calendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -156,10 +183,7 @@ enum DateParser {
     }
 
     private static func isVague(_ token: String) -> Bool {
-        [
-            "soon", "later", "someday", "sometime", "whenever", "eventually", "shortly", "asap",
-            "尽快", "之后", "以后", "有空", "改天", "最近", "回头", "有时间",
-        ].contains(token)
+        vagueTokens.contains(token)
     }
 
     private static func parseWeekday(_ token: String, at start: Date) -> Date? {

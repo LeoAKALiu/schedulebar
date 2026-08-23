@@ -1,5 +1,5 @@
 {
-  "description": "ScheduleBar plugin hooks. Capture is performed by MCP; hooks must not block Codex.",
+  "description": "ScheduleBar lifecycle capture. Hooks write qualifying turns to the durable local queue and never block Codex.",
   "hooks": {
     "SessionStart": [
       {
@@ -14,6 +14,17 @@
       }
     ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/schedulebar-mcp\" hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
       {
         "hooks": [
           {

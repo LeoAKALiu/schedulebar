@@ -1,13 +1,14 @@
 import Foundation
-import ScheduleBar
 import ServiceManagement
 
-final class SMAppServiceLoginItem: LoginItemControlling, @unchecked Sendable {
-    var isEnabled: Bool {
+public final class SMAppServiceLoginItem: LoginItemControlling, @unchecked Sendable {
+    public init() {}
+
+    public var isEnabled: Bool {
         SMAppService.mainApp.status == .enabled
     }
 
-    func setEnabled(_ enabled: Bool) {
+    public func setEnabled(_ enabled: Bool) {
         if enabled {
             try? SMAppService.mainApp.register()
         } else {

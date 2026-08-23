@@ -15,6 +15,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private let sessionDirectory: SessionDirectory
     private let healthEnvironment: HealthEnvironment
     private let loginItems: LoginItemControlling
+    private let modelJobRunLock = NSLock()
+    private var modelJobsRunning = false
 
     public init(
         storeURL: URL,
@@ -44,6 +46,9 @@ public final class ScheduleBarStore: @unchecked Sendable {
         case .quickAdd(let input):
             try requireHuman(authority)
             return try quickAdd(input)
+        case .editTask(let id, let input):
+            try requireHuman(authority)
+            return try editTask(id, input: input)
         case .capture(let capture):
             let queued = CaptureQueue(storeURL: storeURL).enqueue(capture)
             guard queued.outcome == .recorded else { return queued }
@@ -144,6 +149,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
 
     public func processInbox() -> [Receipt] {
         let pending: [(key: String, payload: String)]
+        let pendingPlans: [(key: String, payload: String)]
         database.lock.lock()
         do {
             defer { database.lock.unlock() }
@@ -158,10 +164,30 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 }
             }
             pending = rows
+            let planStmt = try database.prepare(
+                "SELECT idempotency_key, payload FROM plan_inbox WHERE status = 'pending' ORDER BY rowid ASC;"
+            )
+            defer { sqlite3_finalize(planStmt) }
+            var planRows: [(String, String)] = []
+            while sqlite3_step(planStmt) == SQLITE_ROW {
+                if let key = database.column(planStmt, 0), let payload = database.column(planStmt, 1) {
+                    planRows.append((key, payload))
+                }
+            }
+            pendingPlans = planRows
         } catch {
             return []
         }
-        return pending.map { applyPending(key: $0.key, payload: $0.payload) }
+        var receipts = pending.map { applyPending(key: $0.key, payload: $0.payload) }
+        receipts.append(contentsOf: pendingPlans.map { applyPendingPlan(key: $0.key, payload: $0.payload) })
+        return receipts
+    }
+
+    public func previewCaptureOutcome(_ event: CaptureEvent) throws -> Outcome {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let mappedProject = try projectID(forDirectory: event.workingDirectory)
+        return captureClassification(event, mappedProject: mappedProject).outcome
     }
 
     public func observableState() throws -> ObservableState {
@@ -202,18 +228,37 @@ public final class ScheduleBarStore: @unchecked Sendable {
             recurrences: try loadRecurrences(),
             diagnostics: try loadDiagnostics(),
             health: try loadHealth(),
-            pendingInboxCount: try pendingInboxCount(),
+            pendingInboxCount: pendingInboxCount(),
             loginAtStartup: loginItems.isEnabled
         )
     }
 
     public func processModelMisses() async {
+        guard beginModelJobRun() else { return }
+        defer { endModelJobRun() }
         let jobs = pendingModelJobs()
         let apiKey = secretStore.loadAPIKey()
         for job in jobs {
             let result = await modelGateway.detectMissedCandidates(job.request, apiKey: apiKey)
             recordModelResult(jobID: job.id, result)
         }
+    }
+
+    /// Timer-driven runs and manual retries can overlap because each HTTP call
+    /// is allowed to take seconds; a second run while one is in flight would
+    /// re-read the same pending jobs and insert duplicate candidates.
+    private func beginModelJobRun() -> Bool {
+        modelJobRunLock.lock()
+        defer { modelJobRunLock.unlock() }
+        if modelJobsRunning { return false }
+        modelJobsRunning = true
+        return true
+    }
+
+    private func endModelJobRun() {
+        modelJobRunLock.lock()
+        defer { modelJobRunLock.unlock() }
+        modelJobsRunning = false
     }
 
     private func pendingModelJobs() -> [(id: String, request: MissedCandidateRequest)] {
@@ -258,18 +303,33 @@ public final class ScheduleBarStore: @unchecked Sendable {
         }
         let turns = scan.turns.sorted {
             if $0.messageTime != $1.messageTime { return $0.messageTime < $1.messageTime }
-            return $0.turnID < $1.turnID
+            return TurnIDOrder.isLess($0.turnID, $1.turnID)
         }
         var queued = false
         for turn in turns {
             if !isAfterCursor(turn) { continue }
             guard let event = captureEvent(from: turn) else {
-                saveCursor(turn)
+                if !saveCursor(turn) { break }
                 continue
             }
             let result = CaptureQueue(storeURL: storeURL).enqueue(event)
+            if result.outcome == .notRecorded {
+                // Keep the cursor on this turn so the next reconcile retries it
+                // instead of silently dropping it forever.
+                recordDiagnostic(
+                    code: "reconcile_enqueue_failed",
+                    message: "retryable: enqueue failed for turn \(turn.turnID)"
+                )
+                break
+            }
             if result.outcome == .recorded { queued = true }
-            saveCursor(turn)
+            if !saveCursor(turn) {
+                recordDiagnostic(
+                    code: "reconcile_cursor_failed",
+                    message: "retryable: could not persist cursor after turn \(turn.turnID)"
+                )
+                break
+            }
         }
         if queued {
             _ = processInbox()
@@ -353,14 +413,30 @@ public final class ScheduleBarStore: @unchecked Sendable {
             guard let row = try candidateRecord(id) else {
                 throw ScheduleBarError.storeUnavailable
             }
-            return try confirmCandidate(row, title: row.title, notes: nil, localPath: nil)
+            return try confirmCandidate(row, title: row.title, notes: row.notes, localPath: row.localPath)
         case .edit(let input):
             let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
-            guard let row = try candidateRecord(id) else {
+            guard try candidateRecord(id) != nil else { throw ScheduleBarError.notFound }
+            let stmt = try database.prepare(
+                "UPDATE candidates SET title = ?, notes = ?, local_path = ? WHERE id = ? AND status = 'open';"
+            )
+            defer { sqlite3_finalize(stmt) }
+            database.bind(stmt, 1, Retention.sanitize(title))
+            database.bind(stmt, 2, trimmed(input.notes).map(Retention.sanitize))
+            database.bind(stmt, 3, trimmed(input.localPath))
+            database.bind(stmt, 4, id.uuidString)
+            guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else {
                 throw ScheduleBarError.storeUnavailable
             }
-            return try confirmCandidate(row, title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath))
+            try appendHistory(
+                summary: "Edited candidate: \(title)",
+                automatic: false,
+                action: "edit_candidate",
+                targetID: id,
+                table: "candidates"
+            )
+            return Receipt(outcome: .candidate, taskID: id, summaryLine: "Candidate updated")
         }
     }
 
@@ -380,6 +456,18 @@ public final class ScheduleBarStore: @unchecked Sendable {
         )
         if let parsed = row.date, let taskID = receipt.taskID {
             try attachDate(parsed, to: taskID)
+        }
+        if let taskID = receipt.taskID {
+            try execChange(
+                "UPDATE source_evidence SET task_id = ? WHERE task_id = ?;",
+                taskID.uuidString,
+                row.id.uuidString
+            )
+            try execChange(
+                "UPDATE source_links SET task_id = ? WHERE task_id = ?;",
+                taskID.uuidString,
+                row.id.uuidString
+            )
         }
         try markCandidate(row.id, status: "confirmed")
         try appendHistory(
@@ -411,21 +499,36 @@ public final class ScheduleBarStore: @unchecked Sendable {
         }
     }
 
+    private func applyPendingPlan(key: String, payload: String) -> Receipt {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = payload.data(using: .utf8),
+              let proposal = try? decoder.decode(PlanProposal.self, from: data)
+        else { return Receipt(outcome: .notRecorded) }
+        do {
+            let receipt = try apply(.proposePlan(proposal), authority: .mainConversation)
+            database.lock.lock()
+            defer { database.lock.unlock() }
+            let stmt = try database.prepare(
+                "UPDATE plan_inbox SET status = 'processed', plan_id = ? WHERE idempotency_key = ?;"
+            )
+            defer { sqlite3_finalize(stmt) }
+            database.bind(stmt, 1, receipt.taskID?.uuidString)
+            database.bind(stmt, 2, key)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { return Receipt(outcome: .notRecorded) }
+            return receipt
+        } catch {
+            return Receipt(outcome: .notRecorded)
+        }
+    }
+
     private func classifyAndApply(_ event: CaptureEvent, inboxKey: String) throws -> Receipt {
         try discoverDirectory(event.workingDirectory)
         let mappedProject = try projectID(forDirectory: event.workingDirectory)
-        let parsedDate = DateParser.parse(phrase: event.datePhrase, kind: event.dateKind, at: event.messageTime)
-        var classified = CaptureClassifier.outcome(for: event)
-        if classified == .recorded, mappedProject == nil {
-            classified = .candidate
-        }
-        if classified == .recorded, parsedDate?.isVague == true {
-            classified = .candidate
-        }
-        let recurrence = RecurrenceParser.parse(event)
-        if classified == .recorded, recurrence == .vague || recurrence == .complex {
-            classified = .candidate
-        }
+        let classification = captureClassification(event, mappedProject: mappedProject)
+        let parsedDate = classification.date
+        let recurrence = classification.recurrence
+        let classified = classification.outcome
         var taskID: UUID?
         switch classified {
         case .recorded:
@@ -484,6 +587,19 @@ public final class ScheduleBarStore: @unchecked Sendable {
         )
     }
 
+    private func captureClassification(
+        _ event: CaptureEvent,
+        mappedProject: UUID?
+    ) -> (outcome: Outcome, date: ParsedDate?, recurrence: RecurrenceParse) {
+        let parsedDate = DateParser.parse(phrase: event.datePhrase, kind: event.dateKind, at: event.messageTime)
+        let recurrence = RecurrenceParser.parse(event)
+        var outcome = CaptureClassifier.outcome(for: event)
+        if outcome == .recorded, mappedProject == nil { outcome = .candidate }
+        if outcome == .recorded, parsedDate?.isVague == true { outcome = .candidate }
+        if outcome == .recorded, recurrence == .vague || recurrence == .complex { outcome = .candidate }
+        return (outcome, parsedDate, recurrence)
+    }
+
     private func quickAdd(_ input: QuickAddInput) throws -> Receipt {
         let title = Retention.sanitize(input.title.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
@@ -492,6 +608,32 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human", projectID: try inboxProjectID())
         try appendHistory(summary: "Added: \(title)", automatic: false, action: "create_task", targetID: receipt.taskID, table: "tasks")
         return receipt
+    }
+
+    private func editTask(_ id: UUID, input: QuickAddInput) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
+        let stmt = try database.prepare(
+            "UPDATE tasks SET title = ?, notes = ?, local_path = ? WHERE id = ? AND lifecycle != 'undone';"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, Retention.sanitize(title))
+        database.bind(stmt, 2, trimmed(input.notes).map(Retention.sanitize))
+        database.bind(stmt, 3, trimmed(input.localPath))
+        database.bind(stmt, 4, id.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else {
+            throw ScheduleBarError.notFound
+        }
+        try appendHistory(
+            summary: "Edited task: \(title)",
+            automatic: false,
+            action: "edit_task",
+            targetID: id,
+            table: "tasks"
+        )
+        return Receipt(outcome: .recorded, taskID: id, summaryLine: "Task updated")
     }
 
     private func insertTask(
@@ -554,12 +696,12 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let sql: String
         if projectID == nil {
             sql = """
-                SELECT id, title, notes, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+                SELECT id, title, notes, local_path, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
                 FROM candidates WHERE status = 'open' ORDER BY created_at DESC;
                 """
         } else {
             sql = """
-                SELECT id, title, notes, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+                SELECT id, title, notes, local_path, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
                 FROM candidates WHERE status = 'open' AND project_id = ? ORDER BY created_at DESC;
                 """
         }
@@ -575,19 +717,20 @@ public final class ScheduleBarStore: @unchecked Sendable {
                   let title = database.column(stmt, 1)
             else { continue }
             let parsed = parsedDate(
-                phrase: database.column(stmt, 4),
-                kind: database.column(stmt, 5),
-                anchor: database.column(stmt, 6),
-                precision: database.column(stmt, 7),
-                status: database.column(stmt, 8),
-                instant: database.column(stmt, 9)
+                phrase: database.column(stmt, 5),
+                kind: database.column(stmt, 6),
+                anchor: database.column(stmt, 7),
+                precision: database.column(stmt, 8),
+                status: database.column(stmt, 9),
+                instant: database.column(stmt, 10)
             )
             items.append(
                 TaskSummary(
                     id: id,
                     title: title,
                     notes: database.column(stmt, 2),
-                    projectID: database.column(stmt, 3).flatMap(UUID.init(uuidString:)),
+                    localPath: database.column(stmt, 3),
+                    projectID: database.column(stmt, 4).flatMap(UUID.init(uuidString:)),
                     datePhrase: parsed?.phrase,
                     datePrecision: parsed?.precision
                 )
@@ -597,14 +740,17 @@ public final class ScheduleBarStore: @unchecked Sendable {
     }
 
     private func insertCandidate(title: String, inboxKey: String, projectID: UUID?, date: ParsedDate? = nil) throws -> UUID {
+        if let existing = try candidateID(forInboxKey: inboxKey) {
+            return existing
+        }
         let id = UUID()
         let createdAt = iso(now())
         let stmt = try database.prepare(
             """
             INSERT INTO candidates (
-                id, title, notes, inbox_key, status, created_at, project_id,
+                id, title, notes, local_path, inbox_key, status, created_at, project_id,
                 date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
-            ) VALUES (?, ?, NULL, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, NULL, NULL, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -635,10 +781,22 @@ public final class ScheduleBarStore: @unchecked Sendable {
         }
     }
 
+    private func candidateID(forInboxKey inboxKey: String) throws -> UUID? {
+        let stmt = try database.prepare(
+            "SELECT id FROM candidates WHERE inbox_key = ? AND status = 'open' LIMIT 1;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, inboxKey)
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let text = database.column(stmt, 0)
+        else { return nil }
+        return UUID(uuidString: text)
+    }
+
     private func candidateRecord(_ id: UUID) throws -> CandidateRecord? {
         let stmt = try database.prepare(
             """
-            SELECT title, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
+            SELECT title, notes, local_path, project_id, date_phrase, date_kind, date_anchor, date_precision, date_status, date_instant
             FROM candidates WHERE id = ? AND status = 'open';
             """
         )
@@ -648,14 +806,16 @@ public final class ScheduleBarStore: @unchecked Sendable {
         return CandidateRecord(
             id: id,
             title: title,
-            projectID: database.column(stmt, 1).flatMap(UUID.init(uuidString:)),
+            notes: database.column(stmt, 1),
+            localPath: database.column(stmt, 2),
+            projectID: database.column(stmt, 3).flatMap(UUID.init(uuidString:)),
             date: parsedDate(
-                phrase: database.column(stmt, 2),
-                kind: database.column(stmt, 3),
-                anchor: database.column(stmt, 4),
-                precision: database.column(stmt, 5),
-                status: database.column(stmt, 6),
-                instant: database.column(stmt, 7)
+                phrase: database.column(stmt, 4),
+                kind: database.column(stmt, 5),
+                anchor: database.column(stmt, 6),
+                precision: database.column(stmt, 7),
+                status: database.column(stmt, 8),
+                instant: database.column(stmt, 9)
             )
         )
     }
@@ -830,7 +990,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         defer { database.lock.unlock() }
         let stmt = try database.prepare(
             """
-            SELECT id, action, target_id, target_table FROM history
+            SELECT id, action, target_id, target_table, detail FROM history
             WHERE automatic = 1 AND undone = 0
             ORDER BY rowid DESC LIMIT 1;
             """
@@ -839,20 +999,28 @@ public final class ScheduleBarStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_ROW,
               let historyID = database.column(stmt, 0),
               let action = database.column(stmt, 1),
-              let target = database.column(stmt, 2),
               let table = database.column(stmt, 3)
         else { throw ScheduleBarError.notFound }
-        if action == "create_task", table == "tasks" {
+        let target = database.column(stmt, 2)
+        let detail = database.column(stmt, 4)
+        if let target, action == "create_task", table == "tasks" {
             try execChange("UPDATE tasks SET lifecycle = 'undone' WHERE id = ?;", target)
-        } else if action == "create_candidate", table == "candidates" {
+        } else if let target, (action == "create_candidate" || action == "model_candidate"), table == "candidates" {
             try execChange("UPDATE candidates SET status = 'undone' WHERE id = ?;", target)
-        } else if action == "propose_plan", table == "plans" {
+        } else if let target, action == "propose_plan", table == "plans" {
             try execChange("UPDATE plans SET status = 'undone' WHERE id = ?;", target)
-        } else if action == "satisfy_acceptance", table == "tasks" {
+        } else if let target, action == "satisfy_acceptance", table == "tasks" {
             try execChange("UPDATE acceptance_evidence SET satisfied = 0 WHERE task_id = ?;", target)
+        } else if let target, action == "set_status", table == "tasks", let detail,
+                  let restored = WorkflowStatus(rawValue: detail) {
+            try execChange("UPDATE tasks SET workflow_status = ?, status_authority = NULL WHERE id = ?;", restored.rawValue, target)
+        } else if action == "discover_directory", table == "directories", let detail {
+            // Remove the pending row so the directory can be re-discovered;
+            // a decision the human already made stands and is not reverted.
+            try execChange("DELETE FROM directories WHERE path = ? AND decision = 'pending';", detail)
         }
         try execChange("UPDATE history SET undone = 1 WHERE id = ?;", historyID)
-        try appendHistory(summary: "Undo automatic change", automatic: false, action: "undo", targetID: UUID(uuidString: target), table: table)
+        try appendHistory(summary: "Undo automatic change", automatic: false, action: "undo", targetID: target.flatMap(UUID.init(uuidString:)), table: table)
         return Receipt(outcome: .recorded, summaryLine: "Undo automatic change")
     }
 
@@ -860,6 +1028,16 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let stmt = try database.prepare(sql)
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, value)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw ScheduleBarError.storeUnavailable
+        }
+    }
+
+    private func execChange(_ sql: String, _ value1: String, _ value2: String) throws {
+        let stmt = try database.prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, value1)
+        database.bind(stmt, 2, value2)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -881,12 +1059,13 @@ public final class ScheduleBarStore: @unchecked Sendable {
         automatic: Bool,
         action: String,
         targetID: UUID?,
-        table: String
+        table: String,
+        detail: String? = nil
     ) throws {
         let stmt = try database.prepare(
             """
-            INSERT INTO history (id, created_at, automatic, summary, action, target_id, target_table, undone)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0);
+            INSERT INTO history (id, created_at, automatic, summary, action, target_id, target_table, undone, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -897,6 +1076,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(stmt, 5, action)
         database.bind(stmt, 6, targetID?.uuidString)
         database.bind(stmt, 7, table)
+        database.bind(stmt, 8, detail)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -904,33 +1084,33 @@ public final class ScheduleBarStore: @unchecked Sendable {
 
     private func insertEvidence(taskID: UUID?, event: CaptureEvent) throws {
         guard let taskID else { return }
+        let evidence = SourceEvidence(
+            threadID: event.threadID,
+            turnID: event.turnID,
+            triggerPhrase: event.triggerPhrase,
+            excerpt: event.excerpt,
+            workingDirectory: event.workingDirectory,
+            messageTime: event.messageTime
+        )
         let stmt = try database.prepare(
             """
             INSERT OR REPLACE INTO source_evidence
-            (task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory)
-            VALUES (?, ?, ?, ?, ?, ?);
+            (task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory, message_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, taskID.uuidString)
-        database.bind(stmt, 2, event.threadID)
-        database.bind(stmt, 3, event.turnID)
-        database.bind(stmt, 4, event.triggerPhrase)
-        database.bind(stmt, 5, event.excerpt)
-        database.bind(stmt, 6, event.workingDirectory)
+        database.bind(stmt, 2, evidence.threadID)
+        database.bind(stmt, 3, evidence.turnID)
+        database.bind(stmt, 4, evidence.triggerPhrase)
+        database.bind(stmt, 5, evidence.excerpt)
+        database.bind(stmt, 6, evidence.workingDirectory)
+        database.bind(stmt, 7, evidence.messageTime.map(iso))
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
-        try insertSourceLink(
-            taskID: taskID,
-            evidence: SourceEvidence(
-                threadID: event.threadID,
-                turnID: event.turnID,
-                triggerPhrase: event.triggerPhrase,
-                excerpt: event.excerpt,
-                workingDirectory: event.workingDirectory
-            )
-        )
+        try insertSourceLink(taskID: taskID, evidence: evidence)
     }
 
     private func requireHuman(_ authority: SourceAuthority) throws {
@@ -963,7 +1143,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(insert, 1, path)
         guard sqlite3_step(insert) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
         notifier.notifyUnknownDirectory(path)
-        try appendHistory(summary: "Discovered directory: \(path)", automatic: true, action: "discover_directory", targetID: nil, table: "directories")
+        try appendHistory(summary: "Discovered directory: \(path)", automatic: true, action: "discover_directory", targetID: nil, table: "directories", detail: path)
     }
 
     private func projectID(forDirectory raw: String) throws -> UUID? {
@@ -1285,7 +1465,13 @@ public final class ScheduleBarStore: @unchecked Sendable {
         } else {
             recordedAuthority = authority
         }
+        let previous = try currentStatus(taskID)
         try writeWorkflowStatus(taskID, resolved, authority: recordedAuthority)
+        if resolved == .blocked, previous != .blocked {
+            try savePreBlockStatus(previous, for: taskID)
+        } else if resolved != .blocked, previous == .blocked {
+            try clearPreBlockStatus(for: taskID)
+        }
         if resolved == .cancelled {
             try updateLifecycle(taskID, "cancelled", trashedAt: nil)
         }
@@ -1294,7 +1480,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
             automatic: authority != .human,
             action: "set_status",
             targetID: taskID,
-            table: "tasks"
+            table: "tasks",
+            detail: previous.rawValue
         )
         if resolved == .completed || resolved == .cancelled {
             try refreshDependents(of: taskID)
@@ -1525,6 +1712,18 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func acceptPlan(_ planID: UUID, _ itemIDs: [UUID]) throws -> Receipt {
         database.lock.lock()
         defer { database.lock.unlock() }
+        try database.exec("BEGIN IMMEDIATE;")
+        do {
+            let receipt = try acceptPlanInTransaction(planID, itemIDs)
+            try database.exec("COMMIT;")
+            return receipt
+        } catch {
+            try? database.exec("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func acceptPlanInTransaction(_ planID: UUID, _ itemIDs: [UUID]) throws -> Receipt {
         let stmt = try database.prepare(
             "SELECT payload, thread_id, turn_id, working_directory, message_time FROM plans WHERE id = ? AND status = 'open';"
         )
@@ -1541,13 +1740,21 @@ public final class ScheduleBarStore: @unchecked Sendable {
         let messageTime = database.column(stmt, 4).flatMap { ISO8601DateFormatter().date(from: $0) } ?? now()
         let accepted = Set(itemIDs)
         let chosen = items.filter { accepted.contains($0.id) }
+        guard !chosen.isEmpty else { throw ScheduleBarError.notFound }
+        for item in chosen {
+            if let parentID = item.parentID,
+               !accepted.contains(parentID),
+               try !taskExists(parentID) {
+                throw ScheduleBarError.notPermitted
+            }
+        }
         let projectID = try projectID(forDirectory: workingDirectory) ?? inboxProjectID()
         var created = Set<UUID>()
         var remaining = chosen
         while !remaining.isEmpty {
             let ready = remaining.filter { item in
                 guard let parent = item.parentID else { return true }
-                return created.contains(parent) || !accepted.contains(parent)
+                return created.contains(parent) || (try? taskExists(parent)) == true || !accepted.contains(parent)
             }
             guard !ready.isEmpty else { break }
             for item in ready {
@@ -1556,7 +1763,13 @@ public final class ScheduleBarStore: @unchecked Sendable {
                     remaining.removeAll { $0.id == item.id }
                     continue
                 }
-                let parent = item.parentID.flatMap { created.contains($0) ? $0 : nil }
+                let parent: UUID?
+                if let parentID = item.parentID,
+                   created.contains(parentID) || (try? taskExists(parentID)) == true {
+                    parent = parentID
+                } else {
+                    parent = nil
+                }
                 _ = try insertTask(
                     title: item.title,
                     notes: nil,
@@ -1580,14 +1793,28 @@ public final class ScheduleBarStore: @unchecked Sendable {
                         turnID: turnID,
                         triggerPhrase: "accepted plan",
                         excerpt: item.title,
-                        workingDirectory: workingDirectory
+                        workingDirectory: workingDirectory,
+                        messageTime: messageTime
                     )
                 )
                 created.insert(item.id)
                 remaining.removeAll { $0.id == item.id }
             }
         }
-        try execChange("UPDATE plans SET status = 'accepted' WHERE id = ? AND status = 'open';", planID.uuidString)
+        let pendingItems = items.filter { !accepted.contains($0.id) }
+        if pendingItems.isEmpty {
+            try execChange("UPDATE plans SET status = 'accepted' WHERE id = ? AND status = 'open';", planID.uuidString)
+        } else {
+            let encoder = JSONEncoder()
+            guard let pendingData = try? encoder.encode(pendingItems),
+                  let pendingPayload = String(data: pendingData, encoding: .utf8)
+            else { throw ScheduleBarError.storeUnavailable }
+            let update = try database.prepare("UPDATE plans SET payload = ? WHERE id = ? AND status = 'open';")
+            defer { sqlite3_finalize(update) }
+            database.bind(update, 1, pendingPayload)
+            database.bind(update, 2, planID.uuidString)
+            guard sqlite3_step(update) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        }
         try appendHistory(summary: "Accepted plan items", automatic: false, action: "accept_plan", targetID: planID, table: "plans")
         return Receipt(outcome: .recorded, taskID: planID, summaryLine: "Accepted plan items")
     }
@@ -1615,8 +1842,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func insertSourceLink(taskID: UUID, evidence: SourceEvidence) throws {
         let stmt = try database.prepare(
             """
-            INSERT INTO source_links (id, task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO source_links (id, task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory, message_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -1627,18 +1854,20 @@ public final class ScheduleBarStore: @unchecked Sendable {
         database.bind(stmt, 5, Retention.sanitize(evidence.triggerPhrase))
         database.bind(stmt, 6, Retention.sanitize(evidence.excerpt))
         database.bind(stmt, 7, evidence.workingDirectory)
+        database.bind(stmt, 8, evidence.messageTime.map(iso))
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
 
     private func loadSourceLinks(for taskID: UUID) throws -> [SourceEvidence] {
         let stmt = try database.prepare(
             """
-            SELECT thread_id, turn_id, trigger_phrase, excerpt, working_directory
+            SELECT thread_id, turn_id, trigger_phrase, excerpt, working_directory, message_time
             FROM source_links WHERE task_id = ? ORDER BY rowid ASC;
             """
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, taskID.uuidString)
+        let formatter = ISO8601DateFormatter()
         var items: [SourceEvidence] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             items.append(
@@ -1647,13 +1876,14 @@ public final class ScheduleBarStore: @unchecked Sendable {
                     turnID: database.column(stmt, 1) ?? "",
                     triggerPhrase: database.column(stmt, 2) ?? "",
                     excerpt: database.column(stmt, 3) ?? "",
-                    workingDirectory: database.column(stmt, 4) ?? ""
+                    workingDirectory: database.column(stmt, 4) ?? "",
+                    messageTime: database.column(stmt, 5).flatMap(formatter.date(from:))
                 )
             )
         }
         if !items.isEmpty { return items }
         let legacy = try database.prepare(
-            "SELECT thread_id, turn_id, trigger_phrase, excerpt, working_directory FROM source_evidence WHERE task_id = ?;"
+            "SELECT thread_id, turn_id, trigger_phrase, excerpt, working_directory, message_time FROM source_evidence WHERE task_id = ?;"
         )
         defer { sqlite3_finalize(legacy) }
         database.bind(legacy, 1, taskID.uuidString)
@@ -1664,7 +1894,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 turnID: database.column(legacy, 1) ?? "",
                 triggerPhrase: database.column(legacy, 2) ?? "",
                 excerpt: database.column(legacy, 3) ?? "",
-                workingDirectory: database.column(legacy, 4) ?? ""
+                workingDirectory: database.column(legacy, 4) ?? "",
+                messageTime: database.column(legacy, 5).flatMap(formatter.date(from:))
             ),
         ]
     }
@@ -1726,6 +1957,9 @@ public final class ScheduleBarStore: @unchecked Sendable {
         guard taskID != blockerID else { throw ScheduleBarError.notPermitted }
         try requireTask(taskID)
         try requireTask(blockerID)
+        if try reaches(from: blockerID, to: taskID) {
+            throw ScheduleBarError.notPermitted
+        }
         let stmt = try database.prepare(
             "INSERT OR IGNORE INTO task_blockers (task_id, blocker_id) VALUES (?, ?);"
         )
@@ -1736,6 +1970,20 @@ public final class ScheduleBarStore: @unchecked Sendable {
         try syncBlockedStatus(taskID)
         try appendHistory(summary: "Blocked by \(blockerID.uuidString)", automatic: false, action: "set_blocked_by", targetID: taskID, table: "tasks")
         return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Blocked by dependency")
+    }
+
+    /// True when `target` is reachable from `start` by following existing
+    /// blocked-by edges; adding `start` as a blocker of `target` would then
+    /// create a cycle in which both tasks stay blocked forever.
+    private func reaches(from start: UUID, to target: UUID) throws -> Bool {
+        var stack = [start]
+        var seen = Set<UUID>()
+        while let current = stack.popLast() {
+            guard seen.insert(current).inserted else { continue }
+            if current == target { return true }
+            stack.append(contentsOf: try loadBlockerIDs(for: current))
+        }
+        return false
     }
 
     private func removeBlockedBy(_ taskID: UUID, _ blockerID: UUID) throws -> Receipt {
@@ -1801,11 +2049,39 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func syncBlockedStatus(_ taskID: UUID) throws {
         let unsatisfied = try hasUnsatisfiedBlockers(try loadBlockerIDs(for: taskID))
         let current = try currentStatus(taskID)
-        if unsatisfied, current != .completed, current != .cancelled, current != .blocked {
-            try writeWorkflowStatus(taskID, .blocked)
+        if unsatisfied, current != .completed, current != .cancelled {
+            if current != .blocked {
+                try savePreBlockStatus(current, for: taskID)
+                try writeWorkflowStatus(taskID, .blocked)
+            }
         } else if !unsatisfied, current == .blocked {
-            try writeWorkflowStatus(taskID, .notStarted)
+            let restored = try preBlockStatus(for: taskID) ?? .notStarted
+            try clearPreBlockStatus(for: taskID)
+            try writeWorkflowStatus(taskID, restored)
         }
+    }
+
+    /// The status a task had before dependency edges marked it blocked, so the
+    /// workflow can be restored (instead of reset) when the last blocker clears.
+    private func savePreBlockStatus(_ status: WorkflowStatus, for taskID: UUID) throws {
+        try execChange("UPDATE tasks SET pre_block_status = ? WHERE id = ?;", status.rawValue, taskID.uuidString)
+    }
+
+    private func preBlockStatus(for taskID: UUID) throws -> WorkflowStatus? {
+        let stmt = try database.prepare("SELECT pre_block_status FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let raw = database.column(stmt, 0)
+        else { return nil }
+        return WorkflowStatus(rawValue: raw)
+    }
+
+    private func clearPreBlockStatus(for taskID: UUID) throws {
+        let stmt = try database.prepare("UPDATE tasks SET pre_block_status = NULL WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
 
     private func refreshDependents(of blockerID: UUID) throws {
@@ -2125,6 +2401,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
             if let parentID = task.parentID { row["parentID"] = parentID.uuidString }
             if let deadline = task.hardDeadline { row["hardDeadline"] = iso(deadline) }
             if let planned = task.plannedAt { row["plannedAt"] = iso(planned) }
+            if let target = task.targetDate { row["targetDate"] = iso(target) }
+            if let followUp = task.followUpAt { row["followUpAt"] = iso(followUp) }
             if let phrase = task.datePhrase { row["datePhrase"] = phrase }
             if let seriesID = task.seriesID { row["seriesID"] = seriesID.uuidString }
             if let occurrence = task.occurrenceDate { row["occurrence"] = iso(occurrence) }
@@ -2167,7 +2445,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func loadAllSources() throws -> [[String: Any]] {
         let stmt = try database.prepare(
             """
-            SELECT task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory
+            SELECT task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory, message_time
             FROM source_links ORDER BY rowid ASC;
             """
         )
@@ -2181,6 +2459,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 "triggerPhrase": database.column(stmt, 3) ?? "",
                 "excerpt": database.column(stmt, 4) ?? "",
                 "workingDirectory": database.column(stmt, 5) ?? "",
+                "messageTime": database.column(stmt, 6) ?? "",
             ])
         }
         return items
@@ -2340,10 +2619,11 @@ public final class ScheduleBarStore: @unchecked Sendable {
         guard let cursor = try? loadCursor(sessionID: turn.sessionID) else { return true }
         if turn.messageTime > cursor.time { return true }
         if turn.messageTime < cursor.time { return false }
-        return turn.turnID > cursor.turnID
+        return TurnIDOrder.isLess(cursor.turnID, turn.turnID)
     }
 
-    private func saveCursor(_ turn: SessionTurn) {
+    @discardableResult
+    private func saveCursor(_ turn: SessionTurn) -> Bool {
         database.lock.lock()
         defer { database.lock.unlock() }
         let sql = """
@@ -2351,12 +2631,12 @@ public final class ScheduleBarStore: @unchecked Sendable {
             VALUES (?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET last_turn_id = excluded.last_turn_id, last_time = excluded.last_time;
             """
-        guard let stmt = try? database.prepare(sql) else { return }
+        guard let stmt = try? database.prepare(sql) else { return false }
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, turn.sessionID)
         database.bind(stmt, 2, turn.turnID)
         database.bind(stmt, 3, iso(turn.messageTime))
-        _ = sqlite3_step(stmt)
+        return sqlite3_step(stmt) == SQLITE_DONE
     }
 
     private func loadCursor(sessionID: String) throws -> (turnID: String, time: Date)? {
@@ -2406,7 +2686,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                     "message": $0.message,
                 ] as [String: Any]
             },
-            "pendingInbox": try pendingInboxCount(),
+            "pendingInbox": pendingInboxCount(),
             "pendingModelJobs": try failedOrPendingModelJobCount(),
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
@@ -2417,7 +2697,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
     }
 
     private func loadHealth() throws -> [ComponentStatus] {
-        let pending = try pendingInboxCount()
+        let pending = pendingInboxCount()
         let reconcileError = try loadDiagnostics().contains { $0.code == "session_unreadable" && $0.retryable }
         let deepseek = secretStore.loadAPIKey() == nil ? "not configured (optional)" : "configured"
         return [
@@ -2437,8 +2717,15 @@ public final class ScheduleBarStore: @unchecked Sendable {
         ]
     }
 
-    private func pendingInboxCount() throws -> Int {
-        let stmt = try database.prepare("SELECT COUNT(*) FROM capture_inbox WHERE status = 'pending';")
+    private func pendingInboxCount() -> Int {
+        let stmt: OpaquePointer?
+        do {
+            stmt = try database.prepare(
+                "SELECT (SELECT COUNT(*) FROM capture_inbox WHERE status = 'pending') + (SELECT COUNT(*) FROM plan_inbox WHERE status = 'pending');"
+            )
+        } catch {
+            return 0
+        }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
@@ -2470,6 +2757,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
 private struct CandidateRecord {
     var id: UUID
     var title: String
+    var notes: String?
+    var localPath: String?
     var projectID: UUID?
     var date: ParsedDate?
 }

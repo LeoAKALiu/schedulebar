@@ -70,7 +70,12 @@ import Testing
     )
     let critical = try #require(
         store.apply(
-            .capture(priorityCapture(key: "p3", title: "Outage", phrase: "this is critical"))
+            .capture(priorityCapture(key: "p3", title: "Outage", phrase: "priority: critical"))
+        ).taskID
+    )
+    let criticalToken = try #require(
+        store.apply(
+            .capture(priorityCapture(key: "p3b", title: "Hotfix", phrase: "p0"))
         ).taskID
     )
     let low = try #require(
@@ -78,11 +83,18 @@ import Testing
             .capture(priorityCapture(key: "p4", title: "Nice to have", phrase: "low priority"))
         ).taskID
     )
+    let descriptive = try #require(
+        store.apply(
+            .capture(priorityCapture(key: "p5", title: "A critical bug was found in the parser", phrase: "2026-09-04"))
+        ).taskID
+    )
     let state = try store.observableState()
     #expect(state.tasks.first { $0.id == plain }?.priority == .normal)
     #expect(state.tasks.first { $0.id == high }?.priority == .high)
     #expect(state.tasks.first { $0.id == critical }?.priority == .critical)
+    #expect(state.tasks.first { $0.id == criticalToken }?.priority == .critical)
     #expect(state.tasks.first { $0.id == low }?.priority == .low)
+    #expect(state.tasks.first { $0.id == descriptive }?.priority == .normal)
 }
 
 @Test func dateUrgencyDoesNotRewriteBusinessPriority() throws {

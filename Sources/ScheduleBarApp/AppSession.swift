@@ -6,8 +6,11 @@ import SwiftUI
 final class AppSession: ObservableObject {
     @Published private(set) var state: ObservableState
     @Published var errorMessage: String?
+    @Published var candidateEditorID: TaskSummary.ID?
+    @Published var directoryToReview: String?
 
     private let store: ScheduleBarStore
+    private var captureRefreshRunning = false
 
     init(store: ScheduleBarStore) throws {
         self.store = store
@@ -20,21 +23,33 @@ final class AppSession: ObservableObject {
     }
 
     convenience init() throws {
+        let notifier = AppDirectoryNotifier()
         try self.init(
             store: ScheduleBarStore(
                 storeURL: StoreLocation.fileURL(),
-                notifier: AppDirectoryNotifier(),
+                notifier: notifier,
                 reminderNotifier: AppReminderNotifier(),
-                modelGateway: HTTPModelGateway(),
+                modelGateway: HTTPModelGateway.userConfigured(),
                 secretStore: KeychainSecretStore(),
                 sessionDirectory: FolderSessionDirectory(
-                    root: (try? ScheduleBarPaths.sessionDirectory())
+                    root: (try? StoreLocation.sessionDirectoryURL())
                         ?? FileManager.default.temporaryDirectory.appending(path: "schedulebar-sessions")
                 ),
                 healthEnvironment: DefaultHealthEnvironment(),
                 loginItems: SMAppServiceLoginItem()
             )
         )
+        notifier.setReviewHandler { [weak self] path, action in
+            guard let self else { return }
+            Task { @MainActor in
+                switch action {
+                case .ignore:
+                    self.perform(.resolveDirectory(path, .ignore), failure: "Could not ignore the directory.")
+                case .review, .createProject, .linkProject:
+                    self.beginDirectoryReview(path)
+                }
+            }
+        }
     }
 
     func quickAdd(title: String, notes: String, localPath: String) {
@@ -57,8 +72,19 @@ final class AppSession: ObservableObject {
         }
     }
 
+    func editTask(_ id: TaskSummary.ID, title: String, notes: String, localPath: String) {
+        perform(
+            .editTask(id, QuickAddInput(title: title, notes: notes, localPath: localPath)),
+            failure: "Could not save the task."
+        )
+    }
+
     func confirmCandidate(_ id: TaskSummary.ID) {
         perform(.reviewCandidate(id, .confirm), failure: "Could not confirm the candidate.")
+    }
+
+    func beginEditingCandidate(_ id: TaskSummary.ID) {
+        candidateEditorID = id
     }
 
     func editCandidate(_ id: TaskSummary.ID, title: String, notes: String, localPath: String) {
@@ -104,6 +130,11 @@ final class AppSession: ObservableObject {
         perform(.resolveDirectory(path, .ignore), failure: "Could not ignore the directory.")
     }
 
+    func beginDirectoryReview(_ path: String) {
+        directoryToReview = path
+        NotificationCenter.default.post(name: AppDirectoryNotifier.openConsoleNotification, object: nil)
+    }
+
     func evidence(for id: TaskSummary.ID) -> SourceEvidence? {
         try? store.sourceEvidence(for: id)
     }
@@ -130,6 +161,45 @@ final class AppSession: ObservableObject {
 
     func setBlockedBy(_ id: TaskSummary.ID, _ blockerID: UUID) {
         perform(.setBlockedBy(id, blockerID), failure: "Could not set the blocker.")
+    }
+
+    func removeBlockedBy(_ id: TaskSummary.ID, _ blockerID: UUID) {
+        perform(.removeBlockedBy(id, blockerID), failure: "Could not remove the blocker.")
+    }
+
+    func addTag(_ id: TaskSummary.ID, _ tag: String) {
+        perform(.addTag(id, tag), failure: "Could not add the tag.")
+    }
+
+    func confirmAlias(_ alias: String, for owner: OwnerSummary) {
+        perform(.confirmAlias(alias, owner.id), failure: "Could not confirm the alias.")
+    }
+
+    func setReminders(_ id: TaskSummary.ID, _ fires: [Date]) {
+        perform(.setReminders(id, fires), failure: "Could not update reminders.")
+    }
+
+    func addReminder(_ id: TaskSummary.ID, at date: Date) {
+        var fires = reminders(for: id).map(\.fireAt)
+        fires.append(date)
+        setReminders(id, fires)
+    }
+
+    func reminders(for id: TaskSummary.ID) -> [Reminder] {
+        (try? store.reminders(for: id)) ?? []
+    }
+
+    var candidateBeingEdited: TaskSummary? {
+        guard let candidateEditorID else { return nil }
+        return state.candidates.first { $0.id == candidateEditorID }
+    }
+
+    func setModelAPIKey(_ key: String) {
+        perform(.setModelAPIKey(key), failure: "Could not save the model key.")
+    }
+
+    func clearModelAPIKey() {
+        perform(.clearModelAPIKey, failure: "Could not clear the model key.")
     }
 
     func stopRecurrence(_ id: UUID) {
@@ -199,6 +269,21 @@ final class AppSession: ObservableObject {
     }
 
     private func startReminderPolling() {
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.captureRefreshRunning else { return }
+                self.captureRefreshRunning = true
+                let store = self.store
+                Task.detached(priority: .utility) {
+                    _ = store.processInbox()
+                    let latest = try? store.observableState()
+                    await MainActor.run {
+                        if let latest { self.state = latest }
+                        self.captureRefreshRunning = false
+                    }
+                }
+            }
+        }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.store.processModelMisses()

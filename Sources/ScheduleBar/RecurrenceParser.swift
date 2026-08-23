@@ -43,6 +43,12 @@ enum RecurrenceParser {
         }
     }
 
+    /// Human-readable rule for the console recurrence pane (issue #19: the
+    /// rule must be viewable, not just the series title and stopped state).
+    static func describe(_ rule: RecurrenceRule) -> String {
+        rule.displayDescription
+    }
+
     static func matches(_ rule: RecurrenceRule, day: Date, calendar: Calendar) -> Bool {
         switch rule {
         case .daily:
@@ -116,5 +122,19 @@ enum RecurrenceParser {
             if let day = digits.first, (1...31).contains(day) { return day }
         }
         return nil
+    }
+}
+
+public extension RecurrenceRule {
+    var displayDescription: String {
+        switch self {
+        case .daily:
+            return "Every day"
+        case .weekly(let weekday):
+            let names = [1: "Sunday", 2: "Monday", 3: "Tuesday", 4: "Wednesday", 5: "Thursday", 6: "Friday", 7: "Saturday"]
+            return "Every \(names[weekday] ?? "weekday \(weekday)")"
+        case .monthly(let day):
+            return "Every month on day \(day)"
+        }
     }
 }

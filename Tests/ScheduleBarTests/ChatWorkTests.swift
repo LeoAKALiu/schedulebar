@@ -73,5 +73,3 @@ import Testing
     #expect(CapturePolicy.chatWorkHelpText.lowercased().contains("automatic") || CapturePolicy.chatWorkHelpText.contains("自动"))
     #expect(CapturePolicy.chatWorkHelpText.lowercased().contains("record") || CapturePolicy.chatWorkHelpText.contains("记录"))
 }
-
-

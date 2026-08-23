@@ -29,15 +29,11 @@ import Testing
 @Test func onlyCurrentTurnTextIsSentToTheGateway() async throws {
     let gateway = ScriptedModelGateway(result: .candidates(["Later"]))
     let store = try mappedModelStore(gateway: gateway)
-    var event = recordTurn(key: "turn-only", title: "Current turn", excerpt: "only this turn matters")
-    event.conversation = "FULL CHAT DUMP should not be sent"
-    event.reasoning = "hidden chain of thought"
+    let event = recordTurn(key: "turn-only", title: "Current turn", excerpt: "only this turn matters")
     _ = try store.apply(.capture(event))
     await store.processModelMisses()
     let request = try #require(gateway.requests.first)
     #expect(request.turnText.contains("only this turn matters"))
-    #expect(request.turnText.contains("FULL CHAT DUMP") == false)
-    #expect(request.turnText.contains("hidden chain of thought") == false)
     #expect(request.threadID == "thread-model")
     #expect(request.turnID == "turn-only")
 }

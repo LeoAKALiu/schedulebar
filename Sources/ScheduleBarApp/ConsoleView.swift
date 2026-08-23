@@ -67,10 +67,14 @@ struct ConsoleView: View {
                                 Text(item.message)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text(item.retryable ? "retryable" : "logged")
+                                Text("\(item.createdAt.formatted(date: .abbreviated, time: .standard)) · \(item.retryable ? "retryable" : "logged")")
                                     .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
                         }
+                    }
+                    Section("Model miss detection") {
+                        ModelKeySection(session: session)
                     }
                     Section("Actions") {
                         Button("Retry failed operations") { session.retryFailures() }
@@ -83,7 +87,7 @@ struct ConsoleView: View {
                 List(session.state.recurrences) { series in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(series.title)
-                        Text(series.isStopped ? "Stopped" : "Active")
+                        Text("\(series.rule.displayDescription) · \(series.isStopped ? "Stopped" : "Active")")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if !series.isStopped {
@@ -102,6 +106,12 @@ struct ConsoleView: View {
                                 Button("Accept") {
                                     session.acceptPlan(plan.id, [item.id])
                                 }
+                                .disabled(
+                                    item.parentID.map { parentID in
+                                        !session.state.tasks.contains { $0.id == parentID }
+                                    } ?? false
+                                )
+                                .help(item.parentID == nil ? "Accept this item" : "Accept its parent first, or accept all")
                             }
                         }
                         Button("Accept all") {
@@ -112,7 +122,8 @@ struct ConsoleView: View {
                 .navigationTitle("Plans")
             } else {
                 List(listedItems, selection: $selectedTaskID) { task in
-                    Text(task.title).tag(task.id)
+                    Text(task.hasUnsatisfiedBlockers ? "⛔ \(task.title)" : task.title)
+                        .tag(task.id)
                 }
                 .navigationTitle("Tasks")
             }
@@ -159,6 +170,11 @@ struct ConsoleView: View {
             session.refresh()
             if selectedTaskID == nil {
                 selectedTaskID = listedItems.first?.id
+            }
+        }
+        .onChange(of: session.directoryToReview) { _, path in
+            if let path {
+                selectedSection = .pending(path)
             }
         }
         .overlay(alignment: .top) {
@@ -267,10 +283,12 @@ private struct TaskDetailView: View {
     @State private var editTitle = ""
     @State private var editNotes = ""
     @State private var editPath = ""
+    @State private var tagDraft = ""
+    @State private var aliasDraft = ""
 
     var body: some View {
         Form {
-            if isCandidate {
+            if isCandidate || !isTrash {
                 TextField("Title", text: $editTitle)
                 TextField("Notes", text: $editNotes)
                 TextField("Local path", text: $editPath)
@@ -283,7 +301,25 @@ private struct TaskDetailView: View {
             LabeledContent("Priority", value: task.priority.rawValue)
             LabeledContent("Date urgency", value: task.dateUrgency.rawValue)
             if !task.blockedByIDs.isEmpty {
-                LabeledContent("Blocked by", value: task.blockedByIDs.map(\.uuidString).joined(separator: ", "))
+                LabeledContent("Blocked by") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(task.blockedByIDs, id: \.self) { blockerID in
+                            HStack {
+                                Text(blockerTitle(blockerID))
+                                Button("Remove") { session.removeBlockedBy(task.id, blockerID) }
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+                if task.hasUnsatisfiedBlockers {
+                    Text("Unsatisfied blockers keep this task in the blocked workflow.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !isCandidate {
+                blockerPicker
             }
             if let progress = task.progressSummary {
                 LabeledContent("Progress", value: progress)
@@ -291,8 +327,8 @@ private struct TaskDetailView: View {
             if task.seriesID != nil {
                 LabeledContent("Occurrence", value: task.occurrenceDate?.formatted(date: .abbreviated, time: .omitted) ?? "—")
             }
-            if !isCandidate {
-                LabeledContent("Notes", value: task.notes ?? "—")
+            if !task.tags.isEmpty {
+                LabeledContent("Tags", value: task.tags.joined(separator: ", "))
             }
             if let phrase = task.datePhrase {
                 LabeledContent("Date", value: phrase)
@@ -302,17 +338,10 @@ private struct TaskDetailView: View {
                     .foregroundStyle(.red)
             }
             if !isCandidate {
-                LabeledContent("Local path") {
-                    if let localPath = task.localPath {
-                        Button(localPath) {
-                            NSWorkspace.shared.activateFileViewerSelecting([
-                                URL(fileURLWithPath: localPath),
-                            ])
-                        }
-                        .buttonStyle(.link)
-                    } else {
-                        Text("—")
-                    }
+                reminderControls
+                tagControls
+                if let owner = session.state.owners.first(where: { $0.id == task.ownerID }) {
+                    aliasControls(for: owner)
                 }
             }
             if let error = session.errorMessage {
@@ -326,6 +355,11 @@ private struct TaskDetailView: View {
                 Button("Confirm", action: confirm)
                 Button("Reject", role: .destructive, action: reject)
             } else {
+                if !isTrash {
+                    Button("Save task changes") {
+                        session.editTask(task.id, title: editTitle, notes: editNotes, localPath: editPath)
+                    }
+                }
                 Button("Not started") { session.setStatus(task.id, .notStarted) }
                 Button("In progress") { session.setStatus(task.id, .inProgress) }
                 Button("Waiting on other") { session.setStatus(task.id, .waitingOnOther) }
@@ -353,6 +387,9 @@ private struct TaskDetailView: View {
                         LabeledContent("Trigger", value: evidence.triggerPhrase)
                         LabeledContent("Excerpt", value: evidence.excerpt)
                         LabeledContent("Directory", value: evidence.workingDirectory)
+                        if let time = evidence.messageTime {
+                            LabeledContent("Message time", value: time.formatted(date: .abbreviated, time: .standard))
+                        }
                     }
                 }
             }
@@ -368,6 +405,113 @@ private struct TaskDetailView: View {
             editTitle = task.title
             editNotes = task.notes ?? ""
             editPath = task.localPath ?? ""
+        }
+    }
+
+    private var blockerPicker: some View {
+        let candidates = session.state.tasks.filter {
+            $0.id != task.id && !task.blockedByIDs.contains($0.id)
+        }
+        return Group {
+            if !candidates.isEmpty {
+                Menu("Add blocker") {
+                    ForEach(candidates) { other in
+                        Button(other.title) { session.setBlockedBy(task.id, other.id) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var reminderControls: some View {
+        Group {
+            let current = session.reminders(for: task.id)
+            if !current.isEmpty {
+                ForEach(current) { reminder in
+                    LabeledContent("Reminder", value: reminder.fireAt.formatted(date: .abbreviated, time: .standard))
+                }
+            } else {
+                Text("No reminders")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Remind in 1 hour") {
+                session.addReminder(task.id, at: Date().addingTimeInterval(3600))
+            }
+            Button("Remind tomorrow 9:00") {
+                session.addReminder(task.id, at: nextNine())
+            }
+            if !current.isEmpty {
+                Button("Clear reminders", role: .destructive) {
+                    session.setReminders(task.id, [])
+                }
+            }
+        }
+    }
+
+    private var tagControls: some View {
+        HStack {
+            TextField("Add tag", text: $tagDraft)
+            Button("Add tag") {
+                let tag = tagDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !tag.isEmpty else { return }
+                session.addTag(task.id, tag)
+                tagDraft = ""
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func aliasControls(for owner: OwnerSummary) -> some View {
+        HStack {
+            TextField("Confirm alias for \(owner.name)", text: $aliasDraft)
+            Button("Confirm alias") {
+                let alias = aliasDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !alias.isEmpty else { return }
+                session.confirmAlias(alias, for: owner)
+                aliasDraft = ""
+            }
+        }
+    }
+
+    private func blockerTitle(_ id: UUID) -> String {
+        let known = session.state.tasks.first { $0.id == id }?.title
+            ?? session.state.trash.first { $0.id == id }?.title
+            ?? session.state.archived.first { $0.id == id }?.title
+        if let known { return known }
+        return "Removed task \(id.uuidString.prefix(8))…"
+    }
+
+    private func nextNine() -> Date {
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        var components = calendar.dateComponents([.year, .month, .day], from: tomorrow)
+        components.hour = 9
+        components.minute = 0
+        return calendar.date(from: components) ?? tomorrow
+    }
+}
+
+private struct ModelKeySection: View {
+    @ObservedObject var session: AppSession
+    @State private var key = ""
+
+    var body: some View {
+        Group {
+            SecureField("DeepSeek-compatible API key", text: $key)
+            HStack {
+                Button("Save key") {
+                    let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    session.setModelAPIKey(trimmed)
+                    key = ""
+                }
+                Button("Clear key", role: .destructive) { session.clearModelAPIKey() }
+            }
+            Text("The key is stored only in the macOS Keychain and never exported.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
