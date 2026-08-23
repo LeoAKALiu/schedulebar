@@ -16,7 +16,12 @@ final class AppSession: ObservableObject {
     }
 
     convenience init() throws {
-        try self.init(store: ScheduleBarStore(storeURL: StoreLocation.fileURL()))
+        try self.init(
+            store: ScheduleBarStore(
+                storeURL: StoreLocation.fileURL(),
+                notifier: AppDirectoryNotifier()
+            )
+        )
     }
 
     func quickAdd(title: String, notes: String, localPath: String) {
@@ -81,6 +86,21 @@ final class AppSession: ObservableObject {
 
     func undoAutomatic() {
         _ = try? store.apply(.undoLastAutomaticChange)
+        refresh()
+    }
+
+    func createProject(for path: String, name: String) {
+        _ = try? store.apply(.resolveDirectory(path, .create(name: name)))
+        refresh()
+    }
+
+    func linkDirectory(_ path: String, to projectID: UUID) {
+        _ = try? store.apply(.resolveDirectory(path, .link(projectID: projectID)))
+        refresh()
+    }
+
+    func ignoreDirectory(_ path: String) {
+        _ = try? store.apply(.resolveDirectory(path, .ignore))
         refresh()
     }
 

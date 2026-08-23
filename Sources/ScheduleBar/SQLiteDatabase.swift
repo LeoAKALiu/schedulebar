@@ -55,7 +55,8 @@ final class SQLiteDatabase {
                 notes TEXT,
                 inbox_key TEXT,
                 status TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                project_id TEXT
             );
             CREATE TABLE IF NOT EXISTS history (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -75,8 +76,29 @@ final class SQLiteDatabase {
                 excerpt TEXT,
                 working_directory TEXT
             );
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS directories (
+                path TEXT PRIMARY KEY NOT NULL,
+                decision TEXT NOT NULL,
+                project_id TEXT,
+                notified INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS tags (
+                name TEXT PRIMARY KEY NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_tags (
+                task_id TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (task_id, tag)
+            );
             """
         )
+        try? exec("ALTER TABLE tasks ADD COLUMN project_id TEXT;")
+        try? exec("ALTER TABLE candidates ADD COLUMN project_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';")
         try? exec("ALTER TABLE tasks ADD COLUMN trashed_at TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human';")

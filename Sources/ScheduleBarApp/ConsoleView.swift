@@ -15,6 +15,12 @@ struct ConsoleView: View {
                 Text("Archive").tag(ConsoleSection.archive)
                 Text("Trash").tag(ConsoleSection.trash)
                 Text("History").tag(ConsoleSection.history)
+                ForEach(session.state.projects) { project in
+                    Text(project.name).tag(ConsoleSection.project(project.id))
+                }
+                ForEach(session.state.pendingDirectories) { discovery in
+                    Text("New: \(discovery.normalizedPath)").tag(ConsoleSection.pending(discovery.normalizedPath))
+                }
             }
             .navigationSplitViewColumnWidth(min: 140, ideal: 160)
         } content: {
@@ -40,11 +46,13 @@ struct ConsoleView: View {
                     session.undoAutomatic()
                 }
                 .padding()
+            } else if case .pending(let path) = selectedSection {
+                DirectoryReviewView(path: path, session: session)
             } else if let task = listedItems.first(where: { $0.id == selectedTaskID }) {
                 TaskDetailView(
                     task: task,
                     isCandidate: selectedSection == .candidates,
-                    evidence: selectedSection == .all ? session.evidence(for: task.id) : nil
+                    evidence: showsEvidence ? session.evidence(for: task.id) : nil
                 ) {
                     session.confirmCandidate(task.id)
                 } reject: {
@@ -77,7 +85,17 @@ struct ConsoleView: View {
         case .candidates: return session.state.candidates
         case .archive: return session.state.archived
         case .trash: return session.state.trash
-        case .all, .history: return session.state.consoleTasks
+        case .project(let id):
+            return session.state.consoleTasks.filter { $0.projectID == id }
+        case .all, .history, .pending:
+            return session.state.consoleTasks
+        }
+    }
+
+    private var showsEvidence: Bool {
+        switch selectedSection {
+        case .all, .project: return true
+        default: return false
         }
     }
 
@@ -89,6 +107,40 @@ private enum ConsoleSection: Hashable {
     case archive
     case trash
     case history
+    case project(UUID)
+    case pending(String)
+}
+
+private struct DirectoryReviewView: View {
+    let path: String
+    @ObservedObject var session: AppSession
+    @State private var name: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("New Codex directory")
+                .font(.headline)
+            Text(path)
+                .textSelection(.enabled)
+            TextField("Project name", text: $name)
+            Button("Create project") {
+                let title = name.isEmpty ? URL(fileURLWithPath: path).lastPathComponent : name
+                session.createProject(for: path, name: title)
+            }
+            ForEach(session.state.projects) { project in
+                Button("Link to \(project.name)") {
+                    session.linkDirectory(path, to: project.id)
+                }
+            }
+            Button("Ignore") {
+                session.ignoreDirectory(path)
+            }
+        }
+        .padding()
+        .onAppear {
+            if name.isEmpty { name = URL(fileURLWithPath: path).lastPathComponent }
+        }
+    }
 }
 
 private struct TaskDetailView: View {

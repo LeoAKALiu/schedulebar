@@ -5,6 +5,7 @@ import Testing
 @Test func explicitRecordAppearsInMenuAndConsole() throws {
     let url = uniqueStoreURL()
     let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     let receipt = try store.apply(.capture(explicitRecord(key: "turn-1", title: "File weekly report")))
     #expect(receipt.outcome == .recorded)
     #expect(receipt.summaryLine.contains("File weekly report"))
@@ -20,6 +21,7 @@ import Testing
     #expect(first.outcome == .recorded)
 
     let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     #expect(try store.observableState().tasks.isEmpty)
 
     let processed = store.processInbox()
@@ -42,6 +44,7 @@ import Testing
     #expect(second.summaryLine.isEmpty == false)
 
     let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     _ = store.processInbox()
     #expect(try store.observableState().tasks.count == 1)
 }
@@ -52,6 +55,7 @@ import Testing
     _ = queue.enqueue(explicitRecord(key: "a", title: "File weekly report"))
     _ = queue.enqueue(explicitRecord(key: "b", title: "File weekly report"))
     let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     _ = store.processInbox()
     #expect(try store.observableState().tasks.count == 2)
 }
@@ -84,6 +88,7 @@ import Testing
     #expect(receipts.filter { $0.outcome == .recorded }.count == 1)
     #expect(receipts.filter { $0.outcome == .duplicate }.count == 1)
     let store = try ScheduleBarStore(storeURL: url)
+    try TestFixtures.mapDefaultDirectory(store)
     _ = store.processInbox()
     #expect(try store.observableState().tasks.count == 1)
 }

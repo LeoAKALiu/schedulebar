@@ -4,6 +4,7 @@ import Testing
 
 @Test func explicitRecordCommandStaysConfirmed() throws {
     let store = try ScheduleBarStore(storeURL: uniqueStoreURL())
+    try TestFixtures.mapDefaultDirectory(store)
     let receipt = try store.apply(.capture(event(key: "e1", title: "Ship v1", phrase: "record as task")))
     #expect(receipt.outcome == .recorded)
     #expect(try store.observableState().tasks.map(\.title) == ["Ship v1"])
@@ -64,6 +65,7 @@ import Testing
 
 @Test func humanTitleIsNotOverwrittenByCapture() throws {
     let store = try ScheduleBarStore(storeURL: uniqueStoreURL())
+    try TestFixtures.mapDefaultDirectory(store)
     _ = try store.apply(.quickAdd(QuickAddInput(title: "File weekly report")))
     _ = try store.apply(.capture(event(key: "h1", title: "File weekly report NOW", phrase: "record as task")))
     let titles = try store.observableState().tasks.map(\.title).sorted()

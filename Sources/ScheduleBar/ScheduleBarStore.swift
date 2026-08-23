@@ -8,10 +8,16 @@ public final class ScheduleBarStore {
     private let storeURL: URL
     private let database: SQLiteDatabase
     private let now: @Sendable () -> Date
+    private let notifier: DirectoryNotifier
 
-    public init(storeURL: URL, now: @escaping @Sendable () -> Date = { Date() }) throws {
+    public init(
+        storeURL: URL,
+        now: @escaping @Sendable () -> Date = { Date() },
+        notifier: DirectoryNotifier = SilentDirectoryNotifier()
+    ) throws {
         self.storeURL = storeURL
         self.now = now
+        self.notifier = notifier
         database = try SQLiteDatabase(url: storeURL)
     }
 
@@ -45,6 +51,12 @@ public final class ScheduleBarStore {
         case .undoLastAutomaticChange:
             try requireHuman(authority)
             return try undoLastAutomaticChange()
+        case .resolveDirectory(let path, let decision):
+            try requireHuman(authority)
+            return try resolveDirectory(path, decision)
+        case .addTag(let taskID, let tag):
+            try requireHuman(authority)
+            return try addTag(taskID, tag)
         }
     }
 
@@ -71,14 +83,22 @@ public final class ScheduleBarStore {
     }
 
     public func observableState() throws -> ObservableState {
+        try observableState(projectID: nil)
+    }
+
+    public func observableState(projectID: UUID?) throws -> ObservableState {
         database.lock.lock()
         defer { database.lock.unlock() }
+        let tasks = try loadTasks(lifecycle: "active", projectID: projectID)
+        let candidates = try loadCandidates(projectID: projectID)
         return ObservableState(
-            tasks: try loadTasks(lifecycle: "active"),
-            candidates: try loadCandidates(),
-            archived: try loadTasks(lifecycle: "archived"),
-            trash: try loadTasks(lifecycle: "trashed"),
-            history: try loadHistory()
+            tasks: tasks,
+            candidates: candidates,
+            archived: try loadTasks(lifecycle: "archived", projectID: projectID),
+            trash: try loadTasks(lifecycle: "trashed", projectID: projectID),
+            history: try loadHistory(),
+            projects: try loadProjects(),
+            pendingDirectories: try loadPendingDirectories()
         )
     }
 
@@ -112,14 +132,14 @@ public final class ScheduleBarStore {
             guard let title = try candidateTitle(id) else {
                 throw ScheduleBarError.storeUnavailable
             }
-            let receipt = try insertTask(title: title, notes: nil, localPath: nil, origin: "human")
+            let receipt = try insertTask(title: title, notes: nil, localPath: nil, origin: "human", projectID: try inboxProjectID())
             try markCandidate(id, status: "confirmed")
             try appendHistory(summary: "Confirmed candidate: \(title)", automatic: false, action: "confirm_candidate", targetID: receipt.taskID, table: "tasks")
             return receipt
         case .edit(let input):
             let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
-            let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human")
+            let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human", projectID: try inboxProjectID())
             try markCandidate(id, status: "confirmed")
             try appendHistory(summary: "Confirmed candidate: \(title)", automatic: false, action: "confirm_candidate", targetID: receipt.taskID, table: "tasks")
             return receipt
@@ -131,11 +151,22 @@ public final class ScheduleBarStore {
         defer { database.lock.unlock() }
         do {
             let event = try decode(payload)
-            let classified = CaptureClassifier.outcome(for: event)
+            try discoverDirectory(event.workingDirectory)
+            let mappedProject = try projectID(forDirectory: event.workingDirectory)
+            var classified = CaptureClassifier.outcome(for: event)
+            if classified == .recorded, mappedProject == nil {
+                classified = .candidate
+            }
             var taskID: UUID?
             switch classified {
             case .recorded:
-                let created = try insertTask(title: event.title, notes: nil, localPath: nil, origin: "capture")
+                let created = try insertTask(
+                    title: event.title,
+                    notes: nil,
+                    localPath: nil,
+                    origin: "capture",
+                    projectID: mappedProject
+                )
                 taskID = created.taskID
                 try insertEvidence(taskID: created.taskID, event: event)
                 try appendHistory(
@@ -146,7 +177,7 @@ public final class ScheduleBarStore {
                     table: "tasks"
                 )
             case .candidate:
-                taskID = try insertCandidate(title: event.title, inboxKey: key)
+                taskID = try insertCandidate(title: event.title, inboxKey: key, projectID: mappedProject)
                 try appendHistory(
                     summary: "Candidate: \(event.title)",
                     automatic: true,
@@ -181,18 +212,18 @@ public final class ScheduleBarStore {
         guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
         database.lock.lock()
         defer { database.lock.unlock() }
-        let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human")
+        let receipt = try insertTask(title: title, notes: trimmed(input.notes), localPath: trimmed(input.localPath), origin: "human", projectID: try inboxProjectID())
         try appendHistory(summary: "Added: \(title)", automatic: false, action: "create_task", targetID: receipt.taskID, table: "tasks")
         return receipt
     }
 
-    private func insertTask(title: String, notes: String?, localPath: String?, origin: String) throws -> Receipt {
+    private func insertTask(title: String, notes: String?, localPath: String?, origin: String, projectID: UUID?) throws -> Receipt {
         let id = UUID()
         let createdAt = iso(now())
         let stmt = try database.prepare(
             """
-            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin)
-            VALUES (?, ?, ?, ?, ?, 'active', ?);
+            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id)
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?);
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -202,6 +233,7 @@ public final class ScheduleBarStore {
         database.bind(stmt, 4, localPath)
         database.bind(stmt, 5, createdAt)
         database.bind(stmt, 6, origin)
+        database.bind(stmt, 7, projectID?.uuidString)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -214,33 +246,48 @@ public final class ScheduleBarStore {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func loadCandidates() throws -> [TaskSummary] {
-        let stmt = try database.prepare(
-            "SELECT id, title, notes FROM candidates WHERE status = 'open' ORDER BY created_at DESC;"
-        )
+    private func loadCandidates(projectID: UUID?) throws -> [TaskSummary] {
+        let sql: String
+        if projectID == nil {
+            sql = "SELECT id, title, notes, project_id FROM candidates WHERE status = 'open' ORDER BY created_at DESC;"
+        } else {
+            sql = "SELECT id, title, notes, project_id FROM candidates WHERE status = 'open' AND project_id = ? ORDER BY created_at DESC;"
+        }
+        let stmt = try database.prepare(sql)
         defer { sqlite3_finalize(stmt) }
+        if let projectID {
+            database.bind(stmt, 1, projectID.uuidString)
+        }
         var items: [TaskSummary] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let idText = database.column(stmt, 0),
                   let id = UUID(uuidString: idText),
                   let title = database.column(stmt, 1)
             else { continue }
-            items.append(TaskSummary(id: id, title: title, notes: database.column(stmt, 2)))
+            items.append(
+                TaskSummary(
+                    id: id,
+                    title: title,
+                    notes: database.column(stmt, 2),
+                    projectID: database.column(stmt, 3).flatMap(UUID.init(uuidString:))
+                )
+            )
         }
         return items
     }
 
-    private func insertCandidate(title: String, inboxKey: String) throws -> UUID {
+    private func insertCandidate(title: String, inboxKey: String, projectID: UUID?) throws -> UUID {
         let id = UUID()
-        let createdAt = ISO8601DateFormatter().string(from: Date())
+        let createdAt = iso(now())
         let stmt = try database.prepare(
-            "INSERT INTO candidates (id, title, notes, inbox_key, status, created_at) VALUES (?, ?, NULL, ?, 'open', ?);"
+            "INSERT INTO candidates (id, title, notes, inbox_key, status, created_at, project_id) VALUES (?, ?, NULL, ?, 'open', ?, ?);"
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, id.uuidString)
         database.bind(stmt, 2, title)
         database.bind(stmt, 3, inboxKey)
         database.bind(stmt, 4, createdAt)
+        database.bind(stmt, 5, projectID?.uuidString)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -275,12 +322,19 @@ public final class ScheduleBarStore {
         }
     }
 
-    private func loadTasks(lifecycle: String) throws -> [TaskSummary] {
-        let stmt = try database.prepare(
-            "SELECT id, title, notes, local_path FROM tasks WHERE lifecycle = ? ORDER BY created_at DESC, title ASC;"
-        )
+    private func loadTasks(lifecycle: String, projectID: UUID?) throws -> [TaskSummary] {
+        let sql: String
+        if projectID == nil {
+            sql = "SELECT id, title, notes, local_path, project_id FROM tasks WHERE lifecycle = ? ORDER BY created_at DESC, title ASC;"
+        } else {
+            sql = "SELECT id, title, notes, local_path, project_id FROM tasks WHERE lifecycle = ? AND project_id = ? ORDER BY created_at DESC, title ASC;"
+        }
+        let stmt = try database.prepare(sql)
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, lifecycle)
+        if let projectID {
+            database.bind(stmt, 2, projectID.uuidString)
+        }
         var tasks: [TaskSummary] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let idText = database.column(stmt, 0),
@@ -292,7 +346,9 @@ public final class ScheduleBarStore {
                     id: id,
                     title: title,
                     notes: database.column(stmt, 2),
-                    localPath: database.column(stmt, 3)
+                    localPath: database.column(stmt, 3),
+                    projectID: database.column(stmt, 4).flatMap(UUID.init(uuidString:)),
+                    tags: try loadTags(for: id)
                 )
             )
         }
@@ -460,6 +516,146 @@ public final class ScheduleBarStore {
 
     private func iso(_ date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
+    }
+
+    private func discoverDirectory(_ raw: String) throws {
+        let path = PathNormalization.normalize(raw)
+        guard !path.isEmpty else { return }
+        let existing = try database.prepare("SELECT notified FROM directories WHERE path = ?;")
+        defer { sqlite3_finalize(existing) }
+        database.bind(existing, 1, path)
+        if sqlite3_step(existing) == SQLITE_ROW {
+            return
+        }
+        let insert = try database.prepare(
+            "INSERT INTO directories (path, decision, project_id, notified) VALUES (?, 'pending', NULL, 1);"
+        )
+        defer { sqlite3_finalize(insert) }
+        database.bind(insert, 1, path)
+        guard sqlite3_step(insert) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        notifier.notifyUnknownDirectory(path)
+        try appendHistory(summary: "Discovered directory: \(path)", automatic: true, action: "discover_directory", targetID: nil, table: "directories")
+    }
+
+    private func projectID(forDirectory raw: String) throws -> UUID? {
+        let path = PathNormalization.normalize(raw)
+        let stmt = try database.prepare("SELECT decision, project_id FROM directories WHERE path = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, path)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard database.column(stmt, 0) == "mapped" else { return nil }
+        return database.column(stmt, 1).flatMap(UUID.init(uuidString:))
+    }
+
+    private func resolveDirectory(_ raw: String, _ decision: DirectoryDecision) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let path = PathNormalization.normalize(raw)
+        switch decision {
+        case .create(let name):
+            let id = try insertProject(name)
+            try upsertDirectory(path, decision: "mapped", projectID: id)
+            try appendHistory(summary: "Created project \(name)", automatic: false, action: "map_directory", targetID: id, table: "projects")
+            return Receipt(outcome: .recorded, taskID: id, projectID: id, summaryLine: "Created project \(name)")
+        case .link(let projectID):
+            try upsertDirectory(path, decision: "mapped", projectID: projectID)
+            try appendHistory(summary: "Linked directory to project", automatic: false, action: "map_directory", targetID: projectID, table: "projects")
+            return Receipt(outcome: .recorded, taskID: projectID, projectID: projectID, summaryLine: "Linked directory")
+        case .ignore:
+            try upsertDirectory(path, decision: "ignored", projectID: nil)
+            try appendHistory(summary: "Ignored directory: \(path)", automatic: false, action: "ignore_directory", targetID: nil, table: "directories")
+            return Receipt(outcome: .recorded, summaryLine: "Ignored directory")
+        }
+    }
+
+    private func upsertDirectory(_ path: String, decision: String, projectID: UUID?) throws {
+        let stmt = try database.prepare(
+            """
+            INSERT INTO directories (path, decision, project_id, notified)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(path) DO UPDATE SET decision = excluded.decision, project_id = excluded.project_id;
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, path)
+        database.bind(stmt, 2, decision)
+        database.bind(stmt, 3, projectID?.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+    }
+
+    private func insertProject(_ name: String) throws -> UUID {
+        let id = UUID()
+        let stmt = try database.prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?);")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, id.uuidString)
+        database.bind(stmt, 2, name)
+        database.bind(stmt, 3, iso(now()))
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        return id
+    }
+
+    private func inboxProjectID() throws -> UUID {
+        let stmt = try database.prepare("SELECT id FROM projects WHERE name = 'Inbox' LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        if sqlite3_step(stmt) == SQLITE_ROW, let id = database.column(stmt, 0).flatMap(UUID.init(uuidString:)) {
+            return id
+        }
+        return try insertProject("Inbox")
+    }
+
+    private func addTag(_ taskID: UUID, _ raw: String) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let tag = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tag.isEmpty else { throw ScheduleBarError.emptyTitle }
+        let insertTag = try database.prepare("INSERT OR IGNORE INTO tags (name) VALUES (?);")
+        defer { sqlite3_finalize(insertTag) }
+        database.bind(insertTag, 1, tag)
+        guard sqlite3_step(insertTag) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        let link = try database.prepare("INSERT OR IGNORE INTO task_tags (task_id, tag) VALUES (?, ?);")
+        defer { sqlite3_finalize(link) }
+        database.bind(link, 1, taskID.uuidString)
+        database.bind(link, 2, tag)
+        guard sqlite3_step(link) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try appendHistory(summary: "Tagged \(tag)", automatic: false, action: "add_tag", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Tagged \(tag)")
+    }
+
+    private func loadTags(for taskID: UUID) throws -> [String] {
+        let stmt = try database.prepare("SELECT tag FROM task_tags WHERE task_id = ? ORDER BY tag ASC;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        var tags: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let tag = database.column(stmt, 0) { tags.append(tag) }
+        }
+        return tags
+    }
+
+    private func loadProjects() throws -> [ProjectSummary] {
+        let stmt = try database.prepare("SELECT id, name FROM projects ORDER BY name ASC;")
+        defer { sqlite3_finalize(stmt) }
+        var items: [ProjectSummary] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let name = database.column(stmt, 1)
+            else { continue }
+            items.append(ProjectSummary(id: id, name: name))
+        }
+        return items
+    }
+
+    private func loadPendingDirectories() throws -> [DirectoryDiscovery] {
+        let stmt = try database.prepare("SELECT path FROM directories WHERE decision = 'pending' ORDER BY path ASC;")
+        defer { sqlite3_finalize(stmt) }
+        var items: [DirectoryDiscovery] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let path = database.column(stmt, 0) {
+                items.append(DirectoryDiscovery(normalizedPath: path))
+            }
+        }
+        return items
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

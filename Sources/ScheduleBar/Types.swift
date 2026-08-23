@@ -62,6 +62,23 @@ public enum InputEvent: Equatable, Sendable {
     case restoreFromTrash(UUID)
     case permanentlyDelete(UUID)
     case undoLastAutomaticChange
+    case resolveDirectory(String, DirectoryDecision)
+    case addTag(UUID, String)
+}
+
+public enum DirectoryDecision: Equatable, Sendable {
+    case create(name: String)
+    case link(projectID: UUID)
+    case ignore
+}
+
+public protocol DirectoryNotifier: Sendable {
+    func notifyUnknownDirectory(_ path: String)
+}
+
+public struct SilentDirectoryNotifier: DirectoryNotifier {
+    public init() {}
+    public func notifyUnknownDirectory(_ path: String) {}
 }
 
 public enum Outcome: String, Equatable, Sendable {
@@ -75,11 +92,13 @@ public enum Outcome: String, Equatable, Sendable {
 public struct Receipt: Equatable, Sendable {
     public var outcome: Outcome
     public var taskID: UUID?
+    public var projectID: UUID?
     public var summaryLine: String
 
-    public init(outcome: Outcome, taskID: UUID? = nil, summaryLine: String? = nil) {
+    public init(outcome: Outcome, taskID: UUID? = nil, projectID: UUID? = nil, summaryLine: String? = nil) {
         self.outcome = outcome
         self.taskID = taskID
+        self.projectID = projectID
         self.summaryLine = summaryLine ?? outcome.defaultSummaryLine
     }
 }
@@ -101,12 +120,42 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var title: String
     public var notes: String?
     public var localPath: String?
+    public var projectID: UUID?
+    public var tags: [String]
 
-    public init(id: UUID, title: String, notes: String? = nil, localPath: String? = nil) {
+    public init(
+        id: UUID,
+        title: String,
+        notes: String? = nil,
+        localPath: String? = nil,
+        projectID: UUID? = nil,
+        tags: [String] = []
+    ) {
         self.id = id
         self.title = title
         self.notes = notes
         self.localPath = localPath
+        self.projectID = projectID
+        self.tags = tags
+    }
+}
+
+public struct ProjectSummary: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var name: String
+
+    public init(id: UUID, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+public struct DirectoryDiscovery: Equatable, Sendable, Identifiable {
+    public var id: String { normalizedPath }
+    public var normalizedPath: String
+
+    public init(normalizedPath: String) {
+        self.normalizedPath = normalizedPath
     }
 }
 
@@ -138,6 +187,8 @@ public struct ObservableState: Equatable, Sendable {
     public var archived: [TaskSummary]
     public var trash: [TaskSummary]
     public var history: [HistoryEntry]
+    public var projects: [ProjectSummary]
+    public var pendingDirectories: [DirectoryDiscovery]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -148,13 +199,17 @@ public struct ObservableState: Equatable, Sendable {
         candidates: [TaskSummary] = [],
         archived: [TaskSummary] = [],
         trash: [TaskSummary] = [],
-        history: [HistoryEntry] = []
+        history: [HistoryEntry] = [],
+        projects: [ProjectSummary] = [],
+        pendingDirectories: [DirectoryDiscovery] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
         self.archived = archived
         self.trash = trash
         self.history = history
+        self.projects = projects
+        self.pendingDirectories = pendingDirectories
     }
 }
 

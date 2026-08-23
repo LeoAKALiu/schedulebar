@@ -5,6 +5,7 @@ import Testing
 @Test func captureCandidateAndQuickAddAppendHistory() throws {
     let store = try ScheduleBarStore(storeURL: uniqueStoreURL())
     _ = try store.apply(.quickAdd(QuickAddInput(title: "Manual task")))
+    try TestFixtures.mapDefaultDirectory(store)
     _ = try store.apply(.capture(record("k1", "Captured task")))
     _ = try store.apply(.capture(tentative("k2", "Maybe later")))
     _ = try store.reviewCandidate(
@@ -21,6 +22,7 @@ import Testing
 @Test func undoAutomaticCaptureRestoresActiveTasks() throws {
     let store = try ScheduleBarStore(storeURL: uniqueStoreURL())
     _ = try store.apply(.quickAdd(QuickAddInput(title: "Keep me")))
+    try TestFixtures.mapDefaultDirectory(store)
     _ = try store.apply(.capture(record("auto-1", "Automatic task")))
     #expect(try store.observableState().tasks.map(\.title).sorted() == ["Automatic task", "Keep me"])
     let receipt = try store.apply(.undoLastAutomaticChange)
@@ -80,6 +82,7 @@ import Testing
 
 @Test func sourceEvidenceIsAvailableOnDemandNotOnMenuTasks() throws {
     let store = try ScheduleBarStore(storeURL: uniqueStoreURL())
+    try TestFixtures.mapDefaultDirectory(store)
     let id = try #require(store.apply(.capture(record("ev-1", "Evidence task"))).taskID)
     let menu = try store.observableState().menuTasks.first
     #expect(menu?.title == "Evidence task")
@@ -94,6 +97,7 @@ import Testing
         let store = try ScheduleBarStore(storeURL: url)
         archivedID = try #require(store.apply(.quickAdd(QuickAddInput(title: "Parked"))).taskID)
         _ = try store.apply(.archive(archivedID))
+        try TestFixtures.mapDefaultDirectory(store)
         _ = try store.apply(.capture(record("r1", "Later undone")))
         _ = try store.apply(.undoLastAutomaticChange)
     }
