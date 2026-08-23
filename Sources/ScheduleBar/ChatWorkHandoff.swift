@@ -2,8 +2,11 @@ import Foundation
 
 public enum CapturePolicy {
     public static let chatWorkAutomaticCapture = false
+    public static let remoteRealtimeCapture = false
     public static let chatWorkHelpText =
         "Chat/Work does not capture automatically. Say “record as task” or use Quick Add."
+    public static let localReconcileHelpText =
+        "Remote/cloud Codex is reconciled only after it is visible locally. This is not realtime capture."
 }
 
 public enum ChatWorkHandoff {

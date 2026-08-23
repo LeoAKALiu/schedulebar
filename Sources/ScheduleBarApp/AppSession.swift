@@ -12,6 +12,7 @@ final class AppSession: ObservableObject {
     init(store: ScheduleBarStore) throws {
         self.store = store
         _ = store.processInbox()
+        _ = store.reconcileSessions()
         _ = store.processDueReminders()
         _ = store.processRecurrences()
         self.state = try store.observableState()
@@ -25,7 +26,11 @@ final class AppSession: ObservableObject {
                 notifier: AppDirectoryNotifier(),
                 reminderNotifier: AppReminderNotifier(),
                 modelGateway: HTTPModelGateway(),
-                secretStore: KeychainSecretStore()
+                secretStore: KeychainSecretStore(),
+                sessionDirectory: FolderSessionDirectory(
+                    root: (try? ScheduleBarPaths.sessionDirectory())
+                        ?? FileManager.default.temporaryDirectory.appending(path: "schedulebar-sessions")
+                )
             )
         )
     }
@@ -157,6 +162,7 @@ final class AppSession: ObservableObject {
 
     func refresh() {
         do {
+            _ = store.reconcileSessions()
             _ = store.processDueReminders()
             _ = store.processRecurrences()
             state = try store.observableState()

@@ -229,6 +229,7 @@ public enum InputEvent: Equatable, Sendable {
     case exportBackup(URL)
     case setModelAPIKey(String)
     case clearModelAPIKey
+    case reconcileSessions
 }
 
 public enum DirectoryDecision: Equatable, Sendable {

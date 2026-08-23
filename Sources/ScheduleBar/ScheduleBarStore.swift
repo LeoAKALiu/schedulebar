@@ -12,6 +12,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private let reminderNotifier: ReminderNotifier
     private let modelGateway: ModelGateway
     private let secretStore: SecretStore
+    private let sessionDirectory: SessionDirectory
 
     public init(
         storeURL: URL,
@@ -19,7 +20,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
         notifier: DirectoryNotifier = SilentDirectoryNotifier(),
         reminderNotifier: ReminderNotifier = SilentReminderNotifier(),
         modelGateway: ModelGateway = SilentModelGateway(),
-        secretStore: SecretStore = MemorySecretStore()
+        secretStore: SecretStore = MemorySecretStore(),
+        sessionDirectory: SessionDirectory = EmptySessionDirectory()
     ) throws {
         self.storeURL = storeURL
         self.now = now
@@ -27,6 +29,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
         self.reminderNotifier = reminderNotifier
         self.modelGateway = modelGateway
         self.secretStore = secretStore
+        self.sessionDirectory = sessionDirectory
         database = try SQLiteDatabase(url: storeURL)
     }
 
@@ -120,6 +123,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
         case .clearModelAPIKey:
             try requireHuman(authority)
             return clearModelAPIKey()
+        case .reconcileSessions:
+            return reconcileSessions()
         }
     }
 
@@ -227,6 +232,32 @@ public final class ScheduleBarStore: @unchecked Sendable {
         } catch {
             return
         }
+    }
+
+    public func reconcileSessions() -> Receipt {
+        let scan = sessionDirectory.scan()
+        for failure in scan.failures {
+            recordDiagnostic(code: "session_unreadable", message: "retryable: \(failure)")
+        }
+        let turns = scan.turns.sorted {
+            if $0.messageTime != $1.messageTime { return $0.messageTime < $1.messageTime }
+            return $0.turnID < $1.turnID
+        }
+        var queued = false
+        for turn in turns {
+            if !isAfterCursor(turn) { continue }
+            guard let event = captureEvent(from: turn) else {
+                saveCursor(turn)
+                continue
+            }
+            let result = CaptureQueue(storeURL: storeURL).enqueue(event)
+            if result.outcome == .recorded { queued = true }
+            saveCursor(turn)
+        }
+        if queued {
+            _ = processInbox()
+        }
+        return Receipt(outcome: .recorded, summaryLine: "Reconciled local sessions")
     }
 
     public func processRecurrences() -> Int {
@@ -2079,6 +2110,78 @@ public final class ScheduleBarStore: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, title)
         return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func captureEvent(from turn: SessionTurn) -> CaptureEvent? {
+        let key = "session:\(turn.sessionID):\(turn.turnID)"
+        if let explicit = ChatWorkHandoff.event(
+            userText: turn.userText,
+            idempotencyKey: key,
+            workingDirectory: turn.workingDirectory,
+            threadID: turn.sessionID,
+            turnID: turn.turnID,
+            messageTime: turn.messageTime
+        ) {
+            var event = explicit
+            event.authority = turn.authority
+            return event
+        }
+        let line = turn.userText.split(whereSeparator: \.isNewline).first.map(String.init) ?? turn.userText
+        let title = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        return CaptureEvent(
+            idempotencyKey: key,
+            title: String(title.prefix(80)),
+            authority: turn.authority,
+            threadID: turn.sessionID,
+            turnID: turn.turnID,
+            messageTime: turn.messageTime,
+            workingDirectory: turn.workingDirectory,
+            triggerPhrase: String(turn.userText.prefix(200)),
+            excerpt: String(turn.userText.prefix(280))
+        )
+    }
+
+    private func isAfterCursor(_ turn: SessionTurn) -> Bool {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        guard let cursor = try? loadCursor(sessionID: turn.sessionID) else { return true }
+        if turn.messageTime > cursor.time { return true }
+        if turn.messageTime < cursor.time { return false }
+        return turn.turnID > cursor.turnID
+    }
+
+    private func saveCursor(_ turn: SessionTurn) {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let sql = """
+            INSERT INTO session_cursors (session_id, last_turn_id, last_time)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET last_turn_id = excluded.last_turn_id, last_time = excluded.last_time;
+            """
+        guard let stmt = try? database.prepare(sql) else { return }
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, turn.sessionID)
+        database.bind(stmt, 2, turn.turnID)
+        database.bind(stmt, 3, iso(turn.messageTime))
+        _ = sqlite3_step(stmt)
+    }
+
+    private func loadCursor(sessionID: String) throws -> (turnID: String, time: Date)? {
+        let stmt = try database.prepare("SELECT last_turn_id, last_time FROM session_cursors WHERE session_id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, sessionID)
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let turnID = database.column(stmt, 0),
+              let time = database.column(stmt, 1).flatMap({ ISO8601DateFormatter().date(from: $0) })
+        else { return nil }
+        return (turnID, time)
+    }
+
+    private func recordDiagnostic(code: String, message: String) {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try? insertDiagnostic(code: code, message: message)
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

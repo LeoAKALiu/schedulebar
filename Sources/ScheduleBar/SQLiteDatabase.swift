@@ -173,6 +173,11 @@ final class SQLiteDatabase {
                 code TEXT NOT NULL,
                 message TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS session_cursors (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                last_turn_id TEXT NOT NULL,
+                last_time TEXT NOT NULL
+            );
             """
         )
         try exec(

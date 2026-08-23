@@ -20,4 +20,11 @@ public enum ScheduleBarPaths {
         let stamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "-")
         return directory.appending(path: "schedulebar-\(stamp).json")
     }
+
+    public static func sessionDirectory() throws -> URL {
+        let store = try defaultStoreURL()
+        let directory = store.deletingLastPathComponent().appending(path: "sessions", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
 }

@@ -23,6 +23,8 @@ schedulebar-mcp record --text "record as task File the weekly report" --key <ide
 
 or the MCP tool `record_as_task`. Success, duplicate, and failure receipts are explicit; failure reason is `未记录`. Codex lifecycle hooks remain the automatic path.
 
+Remote or cloud Codex sessions are **not** captured in realtime. After they have been synced to `Application Support/ScheduleBar/sessions/` as JSONL, ScheduleBar reconciles locally with a persistent cursor. Drop files there; unreadability is a retryable diagnostic and does not block the app.
+
 ## Agent skills
 
 ### Issue tracker
