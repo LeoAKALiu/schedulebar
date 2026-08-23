@@ -62,7 +62,9 @@ private struct MCPStdio {
             triggerPhrase: string(args["trigger_phrase"] ?? args["user_text"]),
             excerpt: string(args["excerpt"]),
             datePhrase: optionalString(args["date_phrase"] ?? args["datePhrase"]),
-            dateKind: dateKind(args["date_kind"] ?? args["dateKind"])
+            dateKind: dateKind(args["date_kind"] ?? args["dateKind"]),
+            ownerName: optionalString(args["owner_name"] ?? args["ownerName"]),
+            ownerKind: ownerKind(args["owner_kind"] ?? args["ownerKind"])
         )
         let url = (ProcessInfo.processInfo.environment["SCHEDULEBAR_STORE"]).map { URL(fileURLWithPath: $0) }
             ?? (try? ScheduleBarPaths.defaultStoreURL())
@@ -110,6 +112,8 @@ private struct MCPStdio {
                     "authority": ["type": "string"],
                     "date_phrase": ["type": "string"],
                     "date_kind": ["type": "string"],
+                    "owner_name": ["type": "string"],
+                    "owner_kind": ["type": "string"],
                 ],
                 "required": ["title"],
             ],
@@ -118,6 +122,16 @@ private struct MCPStdio {
 
     func authority(_ value: Any?) -> SourceAuthority {
         SourceAuthority(rawValue: string(value)) ?? .mainConversation
+    }
+
+    func ownerKind(_ value: Any?) -> OwnerKind? {
+        let raw = string(value).replacingOccurrences(of: "_", with: "").lowercased()
+        switch raw {
+        case "self", "selfperson", "me": return .selfPerson
+        case "person", "other": return .person
+        case "agent": return .agent
+        default: return nil
+        }
     }
 
     func dateKind(_ value: Any?) -> DateKind? {

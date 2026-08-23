@@ -112,8 +112,25 @@ final class SQLiteDatabase {
                 fired INTEGER NOT NULL DEFAULT 0,
                 fired_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS owners (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS owner_aliases (
+                alias TEXT PRIMARY KEY NOT NULL,
+                owner_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS acceptance_evidence (
+                id TEXT PRIMARY KEY NOT NULL,
+                task_id TEXT NOT NULL,
+                criterion TEXT NOT NULL,
+                satisfied INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
+        try? exec("ALTER TABLE tasks ADD COLUMN owner_id TEXT;")
+        try? exec("ALTER TABLE tasks ADD COLUMN workflow_status TEXT NOT NULL DEFAULT 'notStarted';")
         try? exec("ALTER TABLE tasks ADD COLUMN project_id TEXT;")
         try? exec("ALTER TABLE candidates ADD COLUMN project_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';")

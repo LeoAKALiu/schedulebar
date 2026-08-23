@@ -1,4 +1,5 @@
 import AppKit
+import ScheduleBar
 import SwiftUI
 
 struct MenuBarView: View {
@@ -19,21 +20,28 @@ struct MenuBarView: View {
         if !session.state.overdue.isEmpty {
             Text("Overdue (\(session.state.overdueCount))")
             ForEach(session.state.overdue) { task in
-                Text(task.title)
+                TaskStatusMenu(task: task, session: session)
             }
             Divider()
         }
         if !session.state.today.isEmpty {
             Text("Today (\(session.state.todayCount))")
             ForEach(session.state.today) { task in
-                Text(task.title)
+                TaskStatusMenu(task: task, session: session)
             }
             Divider()
         }
         if !session.state.nextSevenDays.isEmpty {
             Text("Next 7 days")
             ForEach(session.state.nextSevenDays) { task in
-                Text(task.title)
+                TaskStatusMenu(task: task, session: session)
+            }
+            Divider()
+        }
+        if !session.state.waitingOnOthers.isEmpty {
+            Text("Waiting on others (\(session.state.waitingOnOthers.count))")
+            ForEach(session.state.waitingOnOthers) { task in
+                TaskStatusMenu(task: task, session: session)
             }
             Divider()
         }
@@ -41,7 +49,7 @@ struct MenuBarView: View {
             Text("No tasks yet")
         } else if !session.state.unscheduledMenuTasks.isEmpty {
             ForEach(session.state.unscheduledMenuTasks) { task in
-                Text(task.title)
+                TaskStatusMenu(task: task, session: session)
             }
         }
         Divider()
@@ -54,6 +62,27 @@ struct MenuBarView: View {
         Divider()
         Button("Quit ScheduleBar") {
             NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+private struct TaskStatusMenu: View {
+    let task: TaskSummary
+    @ObservedObject var session: AppSession
+
+    var body: some View {
+        Menu(task.title) {
+            Button("Not started") { session.setStatus(task.id, .notStarted) }
+            Button("In progress") { session.setStatus(task.id, .inProgress) }
+            Button("Waiting on other") { session.setStatus(task.id, .waitingOnOther) }
+            Button("Blocked") { session.setStatus(task.id, .blocked) }
+            Button("Pending acceptance") { session.setStatus(task.id, .pendingAcceptance) }
+            Button("Complete") { session.setStatus(task.id, .completed) }
+            Button("Cancel", role: .destructive) { session.setStatus(task.id, .cancelled) }
+            Divider()
+            ForEach(session.state.owners) { owner in
+                Button(owner.name) { session.setOwner(task.id, owner) }
+            }
         }
     }
 }

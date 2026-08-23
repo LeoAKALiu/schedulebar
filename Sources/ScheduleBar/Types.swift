@@ -31,6 +31,8 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
 
     public var datePhrase: String?
     public var dateKind: DateKind?
+    public var ownerName: String?
+    public var ownerKind: OwnerKind?
 
     public init(
         idempotencyKey: String,
@@ -43,7 +45,9 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         triggerPhrase: String,
         excerpt: String,
         datePhrase: String? = nil,
-        dateKind: DateKind? = nil
+        dateKind: DateKind? = nil,
+        ownerName: String? = nil,
+        ownerKind: OwnerKind? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.title = title
@@ -57,6 +61,37 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         let phrase = datePhrase?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.datePhrase = (phrase?.isEmpty == false) ? phrase : nil
         self.dateKind = dateKind
+        let owner = ownerName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ownerName = (owner?.isEmpty == false) ? owner : nil
+        self.ownerKind = ownerKind
+    }
+}
+
+public enum OwnerKind: String, Codable, Equatable, Sendable {
+    case selfPerson = "self"
+    case person
+    case agent
+}
+
+public enum WorkflowStatus: String, Codable, Equatable, Sendable {
+    case notStarted
+    case inProgress
+    case waitingOnOther
+    case blocked
+    case pendingAcceptance
+    case completed
+    case cancelled
+}
+
+public struct OwnerSummary: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var kind: OwnerKind
+
+    public init(id: UUID, name: String, kind: OwnerKind) {
+        self.id = id
+        self.name = name
+        self.kind = kind
     }
 }
 
@@ -86,6 +121,12 @@ public enum InputEvent: Equatable, Sendable {
     case resolveDirectory(String, DirectoryDecision)
     case addTag(UUID, String)
     case setReminders(UUID, [Date])
+    case setOwner(UUID, String, OwnerKind)
+    case confirmAlias(String, UUID)
+    case setStatus(UUID, WorkflowStatus)
+    case requireAcceptance(UUID, String)
+    case satisfyAcceptance(UUID, String)
+    case setFollowUp(UUID, Date)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -170,6 +211,10 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var targetDate: Date?
     public var followUpAt: Date?
     public var isOverdue: Bool
+    public var ownerID: UUID?
+    public var ownerName: String?
+    public var ownerKind: OwnerKind?
+    public var status: WorkflowStatus
 
     public init(
         id: UUID,
@@ -184,7 +229,11 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         plannedAt: Date? = nil,
         targetDate: Date? = nil,
         followUpAt: Date? = nil,
-        isOverdue: Bool = false
+        isOverdue: Bool = false,
+        ownerID: UUID? = nil,
+        ownerName: String? = nil,
+        ownerKind: OwnerKind? = nil,
+        status: WorkflowStatus = .notStarted
     ) {
         self.id = id
         self.title = title
@@ -199,6 +248,10 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.targetDate = targetDate
         self.followUpAt = followUpAt
         self.isOverdue = isOverdue
+        self.ownerID = ownerID
+        self.ownerName = ownerName
+        self.ownerKind = ownerKind
+        self.status = status
     }
 }
 
@@ -254,6 +307,8 @@ public struct ObservableState: Equatable, Sendable {
     public var overdue: [TaskSummary]
     public var today: [TaskSummary]
     public var nextSevenDays: [TaskSummary]
+    public var waitingOnOthers: [TaskSummary]
+    public var owners: [OwnerSummary]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -261,8 +316,8 @@ public struct ObservableState: Equatable, Sendable {
     public var todayCount: Int { today.count }
     public var overdueCount: Int { overdue.count }
     public var unscheduledMenuTasks: [TaskSummary] {
-        let grouped = Set(overdue.map(\.id) + today.map(\.id) + nextSevenDays.map(\.id))
-        return menuTasks.filter { !grouped.contains($0.id) }
+        let grouped = Set(overdue.map(\.id) + today.map(\.id) + nextSevenDays.map(\.id) + waitingOnOthers.map(\.id))
+        return menuTasks.filter { !grouped.contains($0.id) && $0.status != .completed && $0.status != .cancelled }
     }
 
     public init(
@@ -275,7 +330,9 @@ public struct ObservableState: Equatable, Sendable {
         pendingDirectories: [DirectoryDiscovery] = [],
         overdue: [TaskSummary] = [],
         today: [TaskSummary] = [],
-        nextSevenDays: [TaskSummary] = []
+        nextSevenDays: [TaskSummary] = [],
+        waitingOnOthers: [TaskSummary] = [],
+        owners: [OwnerSummary] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -287,6 +344,8 @@ public struct ObservableState: Equatable, Sendable {
         self.overdue = overdue
         self.today = today
         self.nextSevenDays = nextSevenDays
+        self.waitingOnOthers = waitingOnOthers
+        self.owners = owners
     }
 }
 

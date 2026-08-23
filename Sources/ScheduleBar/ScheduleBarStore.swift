@@ -63,6 +63,22 @@ public final class ScheduleBarStore {
         case .setReminders(let taskID, let fires):
             try requireHuman(authority)
             return try setReminders(taskID, fires)
+        case .setOwner(let taskID, let name, let kind):
+            try requireHuman(authority)
+            return try setOwner(taskID, name: name, kind: kind)
+        case .confirmAlias(let alias, let ownerID):
+            try requireHuman(authority)
+            return try confirmAlias(alias, ownerID: ownerID)
+        case .setStatus(let taskID, let status):
+            return try setWorkflowStatus(taskID, status, authority: authority)
+        case .requireAcceptance(let taskID, let criterion):
+            try requireHuman(authority)
+            return try requireAcceptance(taskID, criterion)
+        case .satisfyAcceptance(let taskID, let criterion):
+            return try satisfyAcceptance(taskID, criterion)
+        case .setFollowUp(let taskID, let date):
+            try requireHuman(authority)
+            return try setFollowUp(taskID, date)
         }
     }
 
@@ -100,7 +116,7 @@ public final class ScheduleBarStore {
         var overdue: [TaskSummary] = []
         var today: [TaskSummary] = []
         var nextSevenDays: [TaskSummary] = []
-        for task in tasks {
+        for task in tasks where task.status != .completed && task.status != .cancelled {
             switch DateParser.menuBucket(for: task, now: now()) {
             case .overdue: overdue.append(task)
             case .today: today.append(task)
@@ -118,7 +134,9 @@ public final class ScheduleBarStore {
             pendingDirectories: try loadPendingDirectories(),
             overdue: overdue,
             today: today,
-            nextSevenDays: nextSevenDays
+            nextSevenDays: nextSevenDays,
+            waitingOnOthers: tasks.filter(isWaitingOnOther),
+            owners: try loadOwners()
         )
     }
 
@@ -235,7 +253,9 @@ public final class ScheduleBarStore {
                     notes: nil,
                     localPath: nil,
                     origin: "capture",
-                    projectID: mappedProject
+                    projectID: mappedProject,
+                    ownerName: event.ownerName,
+                    ownerKind: event.ownerKind
                 )
                 taskID = created.taskID
                 if let parsedDate, !parsedDate.isVague, let createdID = created.taskID {
@@ -290,13 +310,24 @@ public final class ScheduleBarStore {
         return receipt
     }
 
-    private func insertTask(title: String, notes: String?, localPath: String?, origin: String, projectID: UUID?) throws -> Receipt {
+    private func insertTask(
+        title: String,
+        notes: String?,
+        localPath: String?,
+        origin: String,
+        projectID: UUID?,
+        ownerName: String? = nil,
+        ownerKind: OwnerKind? = nil
+    ) throws -> Receipt {
         let id = UUID()
         let createdAt = iso(now())
+        let resolvedName = ownerName ?? "Me"
+        let resolvedKind = ownerKind ?? (resolvedName == "Me" ? .selfPerson : .person)
+        let ownerID = try upsertOwner(name: resolvedName, kind: resolvedKind)
         let stmt = try database.prepare(
             """
-            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id)
-            VALUES (?, ?, ?, ?, ?, 'active', ?, ?);
+            INSERT INTO tasks (id, title, notes, local_path, created_at, lifecycle, origin, project_id, owner_id, workflow_status)
+            VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'notStarted');
             """
         )
         defer { sqlite3_finalize(stmt) }
@@ -307,6 +338,7 @@ public final class ScheduleBarStore {
         database.bind(stmt, 5, createdAt)
         database.bind(stmt, 6, origin)
         database.bind(stmt, 7, projectID?.uuidString)
+        database.bind(stmt, 8, ownerID.uuidString)
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw ScheduleBarError.storeUnavailable
         }
@@ -398,9 +430,19 @@ public final class ScheduleBarStore {
     private func loadTasks(lifecycle: String, projectID: UUID?) throws -> [TaskSummary] {
         let sql: String
         if projectID == nil {
-            sql = "SELECT id, title, notes, local_path, project_id FROM tasks WHERE lifecycle = ? ORDER BY created_at DESC, title ASC;"
+            sql = """
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind
+                FROM tasks t
+                LEFT JOIN owners o ON o.id = t.owner_id
+                WHERE t.lifecycle = ? ORDER BY t.created_at DESC, t.title ASC;
+                """
         } else {
-            sql = "SELECT id, title, notes, local_path, project_id FROM tasks WHERE lifecycle = ? AND project_id = ? ORDER BY created_at DESC, title ASC;"
+            sql = """
+                SELECT t.id, t.title, t.notes, t.local_path, t.project_id, t.owner_id, t.workflow_status, o.name, o.kind
+                FROM tasks t
+                LEFT JOIN owners o ON o.id = t.owner_id
+                WHERE t.lifecycle = ? AND t.project_id = ? ORDER BY t.created_at DESC, t.title ASC;
+                """
         }
         let stmt = try database.prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -429,7 +471,11 @@ public final class ScheduleBarStore {
                     plannedAt: dates.plannedAt,
                     targetDate: dates.targetDate,
                     followUpAt: dates.followUpAt,
-                    isOverdue: dates.isOverdue
+                    isOverdue: dates.isOverdue,
+                    ownerID: database.column(stmt, 5).flatMap(UUID.init(uuidString:)),
+                    ownerName: database.column(stmt, 7),
+                    ownerKind: database.column(stmt, 8).flatMap(OwnerKind.init(rawValue:)),
+                    status: database.column(stmt, 6).flatMap(WorkflowStatus.init(rawValue:)) ?? .notStarted
                 )
             )
         }
@@ -873,6 +919,233 @@ public final class ScheduleBarStore {
             overdue = false
         }
         return (phrase, precision, hardDeadline, plannedAt, targetDate, followUpAt, overdue)
+    }
+
+    private func isWaitingOnOther(_ task: TaskSummary) -> Bool {
+        guard task.status != .completed, task.status != .cancelled else { return false }
+        if task.status == .waitingOnOther { return true }
+        if let kind = task.ownerKind, kind != .selfPerson { return true }
+        return false
+    }
+
+    private func setOwner(_ taskID: UUID, name: String, kind: OwnerKind) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try requireTask(taskID)
+        let ownerID = try upsertOwner(name: name, kind: kind)
+        let stmt = try database.prepare("UPDATE tasks SET owner_id = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, ownerID.uuidString)
+        database.bind(stmt, 2, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        if kind != .selfPerson {
+            try updateWorkflowIfNeeded(taskID, to: .waitingOnOther, unless: [.blocked, .pendingAcceptance, .completed, .cancelled])
+        } else {
+            try updateWorkflowIfNeeded(taskID, to: .notStarted, onlyIf: [.waitingOnOther])
+        }
+        try appendHistory(summary: "Assigned owner \(name)", automatic: false, action: "set_owner", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Assigned owner \(name)")
+    }
+
+    private func confirmAlias(_ alias: String, ownerID: UUID) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let name = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw ScheduleBarError.emptyTitle }
+        try requireOwner(ownerID)
+        let stmt = try database.prepare(
+            """
+            INSERT INTO owner_aliases (alias, owner_id) VALUES (?, ?)
+            ON CONFLICT(alias) DO UPDATE SET owner_id = excluded.owner_id;
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, name)
+        database.bind(stmt, 2, ownerID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try appendHistory(summary: "Confirmed alias \(name)", automatic: false, action: "confirm_alias", targetID: ownerID, table: "owners")
+        return Receipt(outcome: .recorded, taskID: ownerID, summaryLine: "Confirmed alias \(name)")
+    }
+
+    private func setWorkflowStatus(_ taskID: UUID, _ status: WorkflowStatus, authority: SourceAuthority) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try requireTask(taskID)
+        var resolved = status
+        if status == .completed, authority != .human, try !acceptanceMet(taskID) {
+            resolved = .pendingAcceptance
+        }
+        try writeWorkflowStatus(taskID, resolved)
+        if resolved == .cancelled {
+            try updateLifecycle(taskID, "cancelled", trashedAt: nil)
+        }
+        try appendHistory(
+            summary: "Status: \(resolved.rawValue)",
+            automatic: authority != .human,
+            action: "set_status",
+            targetID: taskID,
+            table: "tasks"
+        )
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Status: \(resolved.rawValue)")
+    }
+
+    private func requireAcceptance(_ taskID: UUID, _ criterion: String) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try requireTask(taskID)
+        let key = criterion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw ScheduleBarError.emptyTitle }
+        let stmt = try database.prepare(
+            "INSERT INTO acceptance_evidence (id, task_id, criterion, satisfied) VALUES (?, ?, ?, 0);"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, UUID().uuidString)
+        database.bind(stmt, 2, taskID.uuidString)
+        database.bind(stmt, 3, key)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        try appendHistory(summary: "Required acceptance \(key)", automatic: false, action: "require_acceptance", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Required acceptance \(key)")
+    }
+
+    private func satisfyAcceptance(_ taskID: UUID, _ criterion: String) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let stmt = try database.prepare(
+            "UPDATE acceptance_evidence SET satisfied = 1 WHERE task_id = ? AND criterion = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        database.bind(stmt, 2, criterion)
+        guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else {
+            throw ScheduleBarError.notFound
+        }
+        try appendHistory(summary: "Satisfied acceptance \(criterion)", automatic: true, action: "satisfy_acceptance", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Satisfied acceptance \(criterion)")
+    }
+
+    private func setFollowUp(_ taskID: UUID, _ date: Date) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try requireTask(taskID)
+        let instant = DateParser.calendar().startOfDay(for: date)
+        try attachDate(
+            ParsedDate(
+                kind: .followUp,
+                phrase: "follow-up",
+                anchor: now(),
+                instant: instant,
+                precision: .allDay,
+                status: .resolved
+            ),
+            to: taskID
+        )
+        try appendHistory(summary: "Set follow-up", automatic: false, action: "set_follow_up", targetID: taskID, table: "tasks")
+        return Receipt(outcome: .recorded, taskID: taskID, summaryLine: "Set follow-up")
+    }
+
+    private func upsertOwner(name raw: String, kind: OwnerKind) throws -> UUID {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw ScheduleBarError.emptyTitle }
+        if let aliased = try ownerID(forAlias: name) {
+            return aliased
+        }
+        let existing = try database.prepare("SELECT id FROM owners WHERE name = ?;")
+        defer { sqlite3_finalize(existing) }
+        database.bind(existing, 1, name)
+        if sqlite3_step(existing) == SQLITE_ROW, let id = database.column(existing, 0).flatMap(UUID.init(uuidString:)) {
+            return id
+        }
+        let id = UUID()
+        let insert = try database.prepare("INSERT INTO owners (id, name, kind) VALUES (?, ?, ?);")
+        defer { sqlite3_finalize(insert) }
+        database.bind(insert, 1, id.uuidString)
+        database.bind(insert, 2, name)
+        database.bind(insert, 3, kind.rawValue)
+        guard sqlite3_step(insert) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+        return id
+    }
+
+    private func ownerID(forAlias alias: String) throws -> UUID? {
+        let stmt = try database.prepare("SELECT owner_id FROM owner_aliases WHERE alias = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, alias)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return database.column(stmt, 0).flatMap(UUID.init(uuidString:))
+    }
+
+    private func loadOwners() throws -> [OwnerSummary] {
+        let stmt = try database.prepare("SELECT id, name, kind FROM owners ORDER BY name ASC;")
+        defer { sqlite3_finalize(stmt) }
+        var items: [OwnerSummary] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let name = database.column(stmt, 1),
+                  let kind = database.column(stmt, 2).flatMap(OwnerKind.init(rawValue:))
+            else { continue }
+            items.append(OwnerSummary(id: id, name: name, kind: kind))
+        }
+        return items
+    }
+
+    private func requireTask(_ id: UUID) throws {
+        let stmt = try database.prepare("SELECT id FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, id.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw ScheduleBarError.notFound }
+    }
+
+    private func requireOwner(_ id: UUID) throws {
+        let stmt = try database.prepare("SELECT id FROM owners WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, id.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw ScheduleBarError.notFound }
+    }
+
+    private func writeWorkflowStatus(_ taskID: UUID, _ status: WorkflowStatus) throws {
+        let stmt = try database.prepare("UPDATE tasks SET workflow_status = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, status.rawValue)
+        database.bind(stmt, 2, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_DONE, database.changes > 0 else {
+            throw ScheduleBarError.notFound
+        }
+    }
+
+    private func currentStatus(_ taskID: UUID) throws -> WorkflowStatus {
+        let stmt = try database.prepare("SELECT workflow_status FROM tasks WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw ScheduleBarError.notFound }
+        return database.column(stmt, 0).flatMap(WorkflowStatus.init(rawValue:)) ?? .notStarted
+    }
+
+    private func updateWorkflowIfNeeded(
+        _ taskID: UUID,
+        to status: WorkflowStatus,
+        unless excluded: [WorkflowStatus] = [],
+        onlyIf allowed: [WorkflowStatus]? = nil
+    ) throws {
+        let current = try currentStatus(taskID)
+        if let allowed, !allowed.contains(current) { return }
+        if excluded.contains(current) { return }
+        if current != status {
+            try writeWorkflowStatus(taskID, status)
+        }
+    }
+
+    private func acceptanceMet(_ taskID: UUID) throws -> Bool {
+        let stmt = try database.prepare(
+            "SELECT criterion, satisfied FROM acceptance_evidence WHERE task_id = ?;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, taskID.uuidString)
+        var any = false
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            any = true
+            if sqlite3_column_int(stmt, 1) == 0 { return false }
+        }
+        return any
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

@@ -51,6 +51,7 @@ struct ConsoleView: View {
             } else if let task = listedItems.first(where: { $0.id == selectedTaskID }) {
                 TaskDetailView(
                     task: task,
+                    session: session,
                     isCandidate: selectedSection == .candidates,
                     evidence: showsEvidence ? session.evidence(for: task.id) : nil
                 ) {
@@ -145,6 +146,7 @@ private struct DirectoryReviewView: View {
 
 private struct TaskDetailView: View {
     let task: TaskSummary
+    @ObservedObject var session: AppSession
     var isCandidate = false
     var evidence: SourceEvidence?
     var confirm: () -> Void = {}
@@ -157,6 +159,8 @@ private struct TaskDetailView: View {
     var body: some View {
         Form {
             LabeledContent("Title", value: task.title)
+            LabeledContent("Owner", value: task.ownerName ?? "—")
+            LabeledContent("Status", value: task.status.rawValue)
             LabeledContent("Notes", value: task.notes ?? "—")
             if let phrase = task.datePhrase {
                 LabeledContent("Date", value: phrase)
@@ -181,6 +185,14 @@ private struct TaskDetailView: View {
                 Button("Confirm", action: confirm)
                 Button("Reject", role: .destructive, action: reject)
             } else {
+                Button("In progress") { session.setStatus(task.id, .inProgress) }
+                Button("Waiting on other") { session.setStatus(task.id, .waitingOnOther) }
+                Button("Blocked") { session.setStatus(task.id, .blocked) }
+                Button("Pending acceptance") { session.setStatus(task.id, .pendingAcceptance) }
+                Button("Complete") { session.setStatus(task.id, .completed) }
+                ForEach(session.state.owners) { owner in
+                    Button("Assign \(owner.name)") { session.setOwner(task.id, owner) }
+                }
                 Button("Archive", action: archive)
                 Button("Move to Trash", action: trash)
                 Button("Restore", action: restore)

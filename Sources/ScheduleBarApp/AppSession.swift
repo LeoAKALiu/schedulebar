@@ -111,6 +111,16 @@ final class AppSession: ObservableObject {
         try? store.sourceEvidence(for: id)
     }
 
+    func setStatus(_ id: TaskSummary.ID, _ status: WorkflowStatus) {
+        _ = try? store.apply(.setStatus(id, status), authority: .human)
+        refresh()
+    }
+
+    func setOwner(_ id: TaskSummary.ID, _ owner: OwnerSummary) {
+        _ = try? store.apply(.setOwner(id, owner.name, owner.kind), authority: .human)
+        refresh()
+    }
+
     func refresh() {
         do {
             _ = store.processDueReminders()
