@@ -238,6 +238,30 @@ final class SQLiteDatabase {
         try addColumnIfMissing(table: "history", column: "detail", definition: "TEXT")
         try addColumnIfMissing(table: "source_links", column: "message_time", definition: "TEXT")
         try addColumnIfMissing(table: "source_evidence", column: "message_time", definition: "TEXT")
+        try exec(
+            """
+            UPDATE candidates
+            SET project_id = (
+                SELECT directories.project_id
+                FROM source_evidence
+                JOIN directories ON directories.path = source_evidence.working_directory
+                WHERE source_evidence.task_id = candidates.id
+                  AND directories.decision = 'mapped'
+                  AND directories.project_id IS NOT NULL
+                LIMIT 1
+            )
+            WHERE status = 'open'
+              AND project_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM source_evidence
+                  JOIN directories ON directories.path = source_evidence.working_directory
+                  WHERE source_evidence.task_id = candidates.id
+                    AND directories.decision = 'mapped'
+                    AND directories.project_id IS NOT NULL
+              );
+            """
+        )
     }
 
     private func addColumnIfMissing(table: String, column: String, definition: String) throws {

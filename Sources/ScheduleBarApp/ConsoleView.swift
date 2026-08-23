@@ -177,6 +177,11 @@ struct ConsoleView: View {
                 selectedSection = .pending(path)
             }
         }
+        .onChange(of: session.state.pendingDirectories.map(\.normalizedPath)) { _, pendingPaths in
+            if case .pending(let path) = selectedSection, !pendingPaths.contains(path) {
+                selectedSection = .all
+            }
+        }
         .overlay(alignment: .top) {
             if let error = session.errorMessage {
                 Text(error)

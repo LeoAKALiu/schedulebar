@@ -1164,10 +1164,12 @@ public final class ScheduleBarStore: @unchecked Sendable {
         case .create(let name):
             let id = try insertProject(name)
             try upsertDirectory(path, decision: "mapped", projectID: id)
+            try assignOpenCandidates(from: path, to: id)
             try appendHistory(summary: "Created project \(name)", automatic: false, action: "map_directory", targetID: id, table: "projects")
             return Receipt(outcome: .recorded, taskID: id, projectID: id, summaryLine: "Created project \(name)")
         case .link(let projectID):
             try upsertDirectory(path, decision: "mapped", projectID: projectID)
+            try assignOpenCandidates(from: path, to: projectID)
             try appendHistory(summary: "Linked directory to project", automatic: false, action: "map_directory", targetID: projectID, table: "projects")
             return Receipt(outcome: .recorded, taskID: projectID, projectID: projectID, summaryLine: "Linked directory")
         case .ignore:
@@ -1175,6 +1177,22 @@ public final class ScheduleBarStore: @unchecked Sendable {
             try appendHistory(summary: "Ignored directory: \(path)", automatic: false, action: "ignore_directory", targetID: nil, table: "directories")
             return Receipt(outcome: .recorded, summaryLine: "Ignored directory")
         }
+    }
+
+    private func assignOpenCandidates(from path: String, to projectID: UUID) throws {
+        let stmt = try database.prepare(
+            """
+            UPDATE candidates
+            SET project_id = ?
+            WHERE status = 'open' AND project_id IS NULL AND id IN (
+                SELECT task_id FROM source_evidence WHERE working_directory = ?
+            );
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, projectID.uuidString)
+        database.bind(stmt, 2, path)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
 
     private func upsertDirectory(_ path: String, decision: String, projectID: UUID?) throws {

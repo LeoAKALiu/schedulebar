@@ -47,6 +47,42 @@ import Testing
     #expect(try store.observableState().candidates.count == 1)
 }
 
+@Test func mappingAnUnknownDirectoryAssignsItsOpenCandidatesToTheProject() throws {
+    let url = TestFixtures.uniqueStoreURL()
+    let store = try ScheduleBarStore(storeURL: url)
+    let directory = "/tmp/schedulebar-late-mapping-\(UUID().uuidString)"
+    let event = CaptureEvent(
+        idempotencyKey: "late-project-mapping",
+        title: "Map me later",
+        authority: .mainConversation,
+        threadID: "thread",
+        turnID: "turn",
+        messageTime: TestFixtures.shanghai(2026, 9, 3, 10),
+        workingDirectory: directory,
+        triggerPhrase: "record as task",
+        excerpt: "record as task Map me later"
+    )
+    #expect(try store.apply(.capture(event)).outcome == .candidate)
+    let candidateID = try #require(try store.observableState().candidates.first?.id)
+
+    let projectID = try #require(
+        store.apply(.resolveDirectory(directory, .create(name: "Late project")), authority: .human).projectID
+    )
+    #expect(try store.observableState().candidates.first?.projectID == projectID)
+
+    var rawDatabase: OpaquePointer?
+    #expect(sqlite3_open(url.path, &rawDatabase) == SQLITE_OK)
+    let resetLegacyProject = "UPDATE candidates SET project_id = NULL WHERE id = '\(candidateID.uuidString)';"
+    #expect(sqlite3_exec(rawDatabase, resetLegacyProject, nil, nil, nil) == SQLITE_OK)
+    sqlite3_close(rawDatabase)
+
+    let reopenedStore = try ScheduleBarStore(storeURL: url)
+    #expect(try reopenedStore.observableState().candidates.first?.projectID == projectID)
+
+    _ = try reopenedStore.apply(.reviewCandidate(candidateID, .confirm), authority: .human)
+    #expect(try reopenedStore.observableState().tasks.first?.projectID == projectID)
+}
+
 @Test func codexHookCapturesHardDeadlineSemantics() throws {
     let url = TestFixtures.uniqueStoreURL()
     let store = try ScheduleBarStore(storeURL: url)
