@@ -59,6 +59,35 @@ final class AppSession: ObservableObject {
         }
     }
 
+    func archive(_ id: TaskSummary.ID) {
+        _ = try? store.apply(.archive(id))
+        refresh()
+    }
+
+    func trash(_ id: TaskSummary.ID) {
+        _ = try? store.apply(.trash(id))
+        refresh()
+    }
+
+    func restore(_ id: TaskSummary.ID) {
+        _ = try? store.apply(.restoreFromTrash(id))
+        refresh()
+    }
+
+    func permanentlyDelete(_ id: TaskSummary.ID) {
+        _ = try? store.apply(.permanentlyDelete(id), authority: .human)
+        refresh()
+    }
+
+    func undoAutomatic() {
+        _ = try? store.apply(.undoLastAutomaticChange)
+        refresh()
+    }
+
+    func evidence(for id: TaskSummary.ID) -> SourceEvidence? {
+        try? store.sourceEvidence(for: id)
+    }
+
     func refresh() {
         do {
             state = try store.observableState()

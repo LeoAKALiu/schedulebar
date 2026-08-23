@@ -55,6 +55,13 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
 public enum InputEvent: Equatable, Sendable {
     case quickAdd(QuickAddInput)
     case capture(CaptureEvent)
+    case reviewCandidate(UUID, CandidateDecision)
+    case cancel(UUID)
+    case archive(UUID)
+    case trash(UUID)
+    case restoreFromTrash(UUID)
+    case permanentlyDelete(UUID)
+    case undoLastAutomaticChange
 }
 
 public enum Outcome: String, Equatable, Sendable {
@@ -103,17 +110,51 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct HistoryEntry: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var summary: String
+    public var isAutomatic: Bool
+    public var createdAt: Date
+
+    public init(id: UUID, summary: String, isAutomatic: Bool, createdAt: Date) {
+        self.id = id
+        self.summary = summary
+        self.isAutomatic = isAutomatic
+        self.createdAt = createdAt
+    }
+}
+
+public struct SourceEvidence: Equatable, Sendable {
+    public var threadID: String
+    public var turnID: String
+    public var triggerPhrase: String
+    public var excerpt: String
+    public var workingDirectory: String
+}
+
 public struct ObservableState: Equatable, Sendable {
     public var tasks: [TaskSummary]
     public var candidates: [TaskSummary]
+    public var archived: [TaskSummary]
+    public var trash: [TaskSummary]
+    public var history: [HistoryEntry]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
     public var candidateCount: Int { candidates.count }
 
-    public init(tasks: [TaskSummary], candidates: [TaskSummary] = []) {
+    public init(
+        tasks: [TaskSummary],
+        candidates: [TaskSummary] = [],
+        archived: [TaskSummary] = [],
+        trash: [TaskSummary] = [],
+        history: [HistoryEntry] = []
+    ) {
         self.tasks = tasks
         self.candidates = candidates
+        self.archived = archived
+        self.trash = trash
+        self.history = history
     }
 }
 
@@ -126,4 +167,7 @@ public enum CandidateDecision: Equatable, Sendable {
 public enum ScheduleBarError: Error, Equatable {
     case emptyTitle
     case storeUnavailable
+    case notPermitted
+    case notFound
+    case trashExpired
 }

@@ -38,7 +38,10 @@ final class SQLiteDatabase {
                 title TEXT NOT NULL,
                 notes TEXT,
                 local_path TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                lifecycle TEXT NOT NULL DEFAULT 'active',
+                trashed_at TEXT,
+                origin TEXT NOT NULL DEFAULT 'human'
             );
             CREATE TABLE IF NOT EXISTS capture_inbox (
                 idempotency_key TEXT PRIMARY KEY NOT NULL,
@@ -54,8 +57,29 @@ final class SQLiteDatabase {
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS history (
+                id TEXT PRIMARY KEY NOT NULL,
+                created_at TEXT NOT NULL,
+                automatic INTEGER NOT NULL,
+                summary TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_id TEXT,
+                target_table TEXT,
+                undone INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS source_evidence (
+                task_id TEXT PRIMARY KEY NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT,
+                trigger_phrase TEXT,
+                excerpt TEXT,
+                working_directory TEXT
+            );
             """
         )
+        try? exec("ALTER TABLE tasks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';")
+        try? exec("ALTER TABLE tasks ADD COLUMN trashed_at TEXT;")
+        try? exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human';")
     }
 
     func exec(_ sql: String) throws {
