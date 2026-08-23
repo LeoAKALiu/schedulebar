@@ -15,8 +15,11 @@ struct ConsoleView: View {
                 Text("Archive").tag(ConsoleSection.archive)
                 Text("Trash").tag(ConsoleSection.trash)
                 Text("History").tag(ConsoleSection.history)
+                Text("Plans (\(session.state.plans.count))").tag(ConsoleSection.plans)
+                Text("Milestones (\(session.state.milestones.count))").tag(ConsoleSection.milestones)
                 ForEach(session.state.projects) { project in
-                    Text(project.name).tag(ConsoleSection.project(project.id))
+                    Text(project.progressSummary.map { "\(project.name) — \($0)" } ?? project.name)
+                        .tag(ConsoleSection.project(project.id))
                 }
                 ForEach(session.state.pendingDirectories) { discovery in
                     Text("New: \(discovery.normalizedPath)").tag(ConsoleSection.pending(discovery.normalizedPath))
@@ -34,6 +37,18 @@ struct ConsoleView: View {
                     }
                 }
                 .navigationTitle("History")
+            } else if selectedSection == .plans {
+                List(session.state.plans) { plan in
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(plan.items) { item in
+                            Text(item.title)
+                        }
+                        Button("Accept all") {
+                            session.acceptPlan(plan.id, plan.items.map(\.id))
+                        }
+                    }
+                }
+                .navigationTitle("Plans")
             } else {
                 List(listedItems, selection: $selectedTaskID) { task in
                     Text(task.title).tag(task.id)
@@ -88,7 +103,8 @@ struct ConsoleView: View {
         case .trash: return session.state.trash
         case .project(let id):
             return session.state.consoleTasks.filter { $0.projectID == id }
-        case .all, .history, .pending:
+        case .milestones: return session.state.milestones
+        case .all, .history, .pending, .plans:
             return session.state.consoleTasks
         }
     }
@@ -110,6 +126,8 @@ private enum ConsoleSection: Hashable {
     case history
     case project(UUID)
     case pending(String)
+    case plans
+    case milestones
 }
 
 private struct DirectoryReviewView: View {
@@ -161,6 +179,10 @@ private struct TaskDetailView: View {
             LabeledContent("Title", value: task.title)
             LabeledContent("Owner", value: task.ownerName ?? "—")
             LabeledContent("Status", value: task.status.rawValue)
+            LabeledContent("Kind", value: task.kind.rawValue)
+            if let progress = task.progressSummary {
+                LabeledContent("Progress", value: progress)
+            }
             LabeledContent("Notes", value: task.notes ?? "—")
             if let phrase = task.datePhrase {
                 LabeledContent("Date", value: phrase)

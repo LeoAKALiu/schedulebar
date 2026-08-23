@@ -131,6 +131,31 @@ final class SQLiteDatabase {
         )
         try? exec("ALTER TABLE tasks ADD COLUMN owner_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN workflow_status TEXT NOT NULL DEFAULT 'notStarted';")
+        try? exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';")
+        try? exec("ALTER TABLE tasks ADD COLUMN parent_id TEXT;")
+        try? exec("ALTER TABLE tasks ADD COLUMN necessary INTEGER NOT NULL DEFAULT 1;")
+        try exec(
+            """
+            CREATE TABLE IF NOT EXISTS plans (
+                id TEXT PRIMARY KEY NOT NULL,
+                idempotency_key TEXT UNIQUE NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT,
+                working_directory TEXT,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_links (
+                id TEXT PRIMARY KEY NOT NULL,
+                task_id TEXT NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT,
+                trigger_phrase TEXT,
+                excerpt TEXT,
+                working_directory TEXT
+            );
+            """
+        )
         try? exec("ALTER TABLE tasks ADD COLUMN project_id TEXT;")
         try? exec("ALTER TABLE candidates ADD COLUMN project_id TEXT;")
         try? exec("ALTER TABLE tasks ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active';")

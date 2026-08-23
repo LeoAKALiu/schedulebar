@@ -127,6 +127,10 @@ public enum InputEvent: Equatable, Sendable {
     case requireAcceptance(UUID, String)
     case satisfyAcceptance(UUID, String)
     case setFollowUp(UUID, Date)
+    case proposePlan(PlanProposal)
+    case acceptPlan(UUID, [UUID])
+    case rejectPlan(UUID)
+    case linkSource(UUID, SourceEvidence)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -215,6 +219,10 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var ownerName: String?
     public var ownerKind: OwnerKind?
     public var status: WorkflowStatus
+    public var kind: WorkKind
+    public var parentID: UUID?
+    public var necessary: Bool
+    public var progressSummary: String?
 
     public init(
         id: UUID,
@@ -233,7 +241,11 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         ownerID: UUID? = nil,
         ownerName: String? = nil,
         ownerKind: OwnerKind? = nil,
-        status: WorkflowStatus = .notStarted
+        status: WorkflowStatus = .notStarted,
+        kind: WorkKind = .task,
+        parentID: UUID? = nil,
+        necessary: Bool = true,
+        progressSummary: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -252,16 +264,22 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.ownerName = ownerName
         self.ownerKind = ownerKind
         self.status = status
+        self.kind = kind
+        self.parentID = parentID
+        self.necessary = necessary
+        self.progressSummary = progressSummary
     }
 }
 
 public struct ProjectSummary: Equatable, Sendable, Identifiable {
     public var id: UUID
     public var name: String
+    public var progressSummary: String?
 
-    public init(id: UUID, name: String) {
+    public init(id: UUID, name: String, progressSummary: String? = nil) {
         self.id = id
         self.name = name
+        self.progressSummary = progressSummary
     }
 }
 
@@ -294,6 +312,85 @@ public struct SourceEvidence: Equatable, Sendable {
     public var triggerPhrase: String
     public var excerpt: String
     public var workingDirectory: String
+
+    public init(
+        threadID: String,
+        turnID: String,
+        triggerPhrase: String,
+        excerpt: String,
+        workingDirectory: String
+    ) {
+        self.threadID = threadID
+        self.turnID = turnID
+        self.triggerPhrase = String(triggerPhrase.prefix(200))
+        self.excerpt = String(excerpt.prefix(280))
+        self.workingDirectory = workingDirectory
+    }
+}
+
+public enum WorkKind: String, Codable, Equatable, Sendable {
+    case task
+    case milestone
+}
+
+public struct PlanItem: Equatable, Sendable, Identifiable, Codable {
+    public var id: UUID
+    public var title: String
+    public var kind: WorkKind
+    public var parentID: UUID?
+    public var necessary: Bool
+    public var datePhrase: String?
+    public var dateKind: DateKind?
+
+    public init(
+        id: UUID,
+        title: String,
+        kind: WorkKind = .task,
+        parentID: UUID? = nil,
+        necessary: Bool = true,
+        datePhrase: String? = nil,
+        dateKind: DateKind? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.kind = kind
+        self.parentID = parentID
+        self.necessary = necessary
+        self.datePhrase = datePhrase
+        self.dateKind = dateKind
+    }
+}
+
+public struct PlanProposal: Equatable, Sendable, Codable {
+    public var idempotencyKey: String
+    public var threadID: String
+    public var turnID: String
+    public var workingDirectory: String
+    public var items: [PlanItem]
+
+    public init(
+        idempotencyKey: String,
+        threadID: String,
+        turnID: String,
+        workingDirectory: String,
+        items: [PlanItem]
+    ) {
+        self.idempotencyKey = idempotencyKey
+        self.threadID = threadID
+        self.turnID = turnID
+        self.workingDirectory = workingDirectory
+        self.items = items
+    }
+}
+
+public struct PlanDraft: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var items: [PlanItem]
+
+    public init(id: UUID, items: [PlanItem]) {
+        self.id = id
+        self.items = items
+    }
 }
 
 public struct ObservableState: Equatable, Sendable {
@@ -309,6 +406,8 @@ public struct ObservableState: Equatable, Sendable {
     public var nextSevenDays: [TaskSummary]
     public var waitingOnOthers: [TaskSummary]
     public var owners: [OwnerSummary]
+    public var plans: [PlanDraft]
+    public var milestones: [TaskSummary]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -332,7 +431,9 @@ public struct ObservableState: Equatable, Sendable {
         today: [TaskSummary] = [],
         nextSevenDays: [TaskSummary] = [],
         waitingOnOthers: [TaskSummary] = [],
-        owners: [OwnerSummary] = []
+        owners: [OwnerSummary] = [],
+        plans: [PlanDraft] = [],
+        milestones: [TaskSummary] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -346,6 +447,8 @@ public struct ObservableState: Equatable, Sendable {
         self.nextSevenDays = nextSevenDays
         self.waitingOnOthers = waitingOnOthers
         self.owners = owners
+        self.plans = plans
+        self.milestones = milestones
     }
 }
 

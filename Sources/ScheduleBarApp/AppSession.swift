@@ -121,6 +121,11 @@ final class AppSession: ObservableObject {
         refresh()
     }
 
+    func acceptPlan(_ id: UUID, _ itemIDs: [UUID]) {
+        _ = try? store.apply(.acceptPlan(id, itemIDs), authority: .human)
+        refresh()
+    }
+
     func refresh() {
         do {
             _ = store.processDueReminders()
