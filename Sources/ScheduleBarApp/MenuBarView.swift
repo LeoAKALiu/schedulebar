@@ -53,6 +53,8 @@ struct MenuBarView: View {
             }
         }
         Divider()
+        Text(CapturePolicy.chatWorkHelpText)
+        Divider()
         Button("Quick Add…") {
             openWindow(id: "quick-add")
         }

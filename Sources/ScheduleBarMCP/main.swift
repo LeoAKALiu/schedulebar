@@ -4,8 +4,13 @@ import ScheduleBar
 @main
 struct ScheduleBarMCP {
     static func main() {
-        if CommandLine.arguments.dropFirst().first == "hook" {
+        let rest = Array(CommandLine.arguments.dropFirst())
+        if rest.first == "hook" {
             _ = FileHandle.standardInput.readDataToEndOfFile()
+            return
+        }
+        if rest.first == "record" {
+            ChatWorkCLI.run(Array(rest.dropFirst()))
             return
         }
         MCPStdio().run()
@@ -32,7 +37,7 @@ private struct MCPStdio {
                     "serverInfo": ["name": "schedulebar", "version": "0.1.0"],
                 ]))
             case "tools/list":
-                write(response: ok(id: id, result: ["tools": [toolSpec()]]))
+                write(response: ok(id: id, result: ["tools": [toolSpec(), recordAsTaskSpec()]]))
             case "tools/call":
                 write(response: ok(id: id, result: callTool(object["params"] as? [String: Any] ?? [:])))
             case "ping":
@@ -48,6 +53,9 @@ private struct MCPStdio {
     func callTool(_ params: [String: Any]) -> [String: Any] {
         let name = params["name"] as? String
         let args = params["arguments"] as? [String: Any] ?? [:]
+        if name == "record_as_task" {
+            return recordAsTask(args)
+        }
         guard name == "capture_work_change" else {
             return ["content": [["type": "text", "text": "未记录"]], "isError": true]
         }
@@ -87,6 +95,56 @@ private struct MCPStdio {
         return [
             "content": [["type": "text", "text": text]],
             "isError": false,
+        ]
+    }
+
+    func recordAsTask(_ args: [String: Any]) -> [String: Any] {
+        let url = (ProcessInfo.processInfo.environment["SCHEDULEBAR_STORE"]).map { URL(fileURLWithPath: $0) }
+            ?? (try? ScheduleBarPaths.defaultStoreURL())
+        let text = string(args["user_text"] ?? args["text"])
+        let title = string(args["title"])
+        let userText = text.isEmpty && !title.isEmpty ? "record as task \(title)" : text
+        let key = string(args["idempotency_key"] ?? args["capture_id"])
+        let cwd = string(args["cwd"] ?? args["working_directory"])
+        guard let url, !key.isEmpty, !userText.isEmpty else {
+            return receiptJSON(Receipt(outcome: .notRecorded))
+        }
+        let receipt = ChatWorkHandoff.submit(
+            userText,
+            storeURL: url,
+            idempotencyKey: key,
+            workingDirectory: cwd,
+            threadID: {
+                let value = string(args["thread_id"] ?? args["session_id"])
+                return value.isEmpty ? "chat-work" : value
+            }(),
+            turnID: optionalString(args["turn_id"]),
+            messageTime: ISO8601DateFormatter().date(from: string(args["message_time"])) ?? Date()
+        )
+        return receiptJSON(receipt)
+    }
+
+    func recordAsTaskSpec() -> [String: Any] {
+        [
+            "name": "record_as_task",
+            "description": "Chat/Work explicit handoff. Only records when the user text contains “record as task” / “记录为任务”. Ordinary chat is not monitored. Failure reason is 未记录.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "user_text": ["type": "string"],
+                    "text": ["type": "string"],
+                    "title": ["type": "string"],
+                    "idempotency_key": ["type": "string"],
+                    "capture_id": ["type": "string"],
+                    "cwd": ["type": "string"],
+                    "working_directory": ["type": "string"],
+                    "thread_id": ["type": "string"],
+                    "session_id": ["type": "string"],
+                    "turn_id": ["type": "string"],
+                    "message_time": ["type": "string"],
+                ],
+                "required": ["idempotency_key"],
+            ],
         ]
     }
 
@@ -208,5 +266,56 @@ private struct MCPStdio {
         let header = "Content-Length: \(data.count)\r\n\r\n"
         FileHandle.standardOutput.write(Data(header.utf8))
         FileHandle.standardOutput.write(data)
+    }
+}
+
+private enum ChatWorkCLI {
+    static func run(_ args: [String]) {
+        var flags: [String: String] = [:]
+        var index = 0
+        while index < args.count {
+            let token = args[index]
+            if token.hasPrefix("--"), index + 1 < args.count {
+                flags[String(token.dropFirst(2))] = args[index + 1]
+                index += 2
+            } else {
+                index += 1
+            }
+        }
+        if flags.isEmpty, let data = try? FileHandle.standardInput.readToEnd(),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in object {
+                if let text = value as? String { flags[key] = text }
+            }
+        }
+        let title = flags["title"] ?? ""
+        let rawText = flags["text"] ?? flags["user_text"] ?? flags["user-text"] ?? ""
+        let userText = rawText.isEmpty && !title.isEmpty ? "record as task \(title)" : rawText
+        let key = flags["key"] ?? flags["idempotency_key"] ?? flags["idempotency-key"] ?? UUID().uuidString
+        let cwd = flags["cwd"] ?? flags["working_directory"] ?? FileManager.default.currentDirectoryPath
+        let url = (ProcessInfo.processInfo.environment["SCHEDULEBAR_STORE"]).map { URL(fileURLWithPath: $0) }
+            ?? (try? ScheduleBarPaths.defaultStoreURL())
+        let receipt: Receipt
+        if let url, !userText.isEmpty {
+            receipt = ChatWorkHandoff.submit(
+                userText,
+                storeURL: url,
+                idempotencyKey: key,
+                workingDirectory: cwd,
+                threadID: flags["thread"] ?? flags["thread_id"] ?? "chat-work",
+                turnID: flags["turn"] ?? flags["turn_id"]
+            )
+        } else {
+            receipt = Receipt(outcome: .notRecorded)
+        }
+        let payload: [String: Any] = [
+            "ok": receipt.outcome != .notRecorded,
+            "outcome": receipt.outcome.rawValue,
+            "recorded": receipt.outcome == .recorded,
+            "reason": receipt.summaryLine,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data("{\"reason\":\"未记录\"}".utf8)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
     }
 }

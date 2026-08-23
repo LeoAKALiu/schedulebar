@@ -10,6 +10,9 @@ struct ConsoleView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedSection) {
+                Text(CapturePolicy.chatWorkHelpText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text("All tasks").tag(ConsoleSection.all)
                 Text("Candidates (\(session.state.candidateCount))").tag(ConsoleSection.candidates)
                 Text("Archive").tag(ConsoleSection.archive)

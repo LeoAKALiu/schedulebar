@@ -1,3 +1,4 @@
+import ScheduleBar
 import SwiftUI
 
 struct QuickAddView: View {
@@ -12,6 +13,9 @@ struct QuickAddView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Quick Add")
                 .font(.headline)
+            Text(CapturePolicy.chatWorkHelpText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextField("Title", text: $title)
             TextField("Notes (optional)", text: $notes, axis: .vertical)
                 .lineLimit(3...6)

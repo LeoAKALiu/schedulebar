@@ -103,6 +103,10 @@ import Testing
     let mcp = try json(pluginRoot.appending(path: ".mcp.json"))
     let servers = try #require(mcp["mcpServers"] as? [String: Any])
     #expect(servers["schedulebar"] != nil)
+    let description = try #require(manifest["interface"] as? [String: Any])
+    let long = try #require(description["longDescription"] as? String)
+    #expect(long.lowercased().contains("chat/work"))
+    #expect(long.lowercased().contains("not captured automatically") || long.contains("不"))
 }
 
 private func explicitRecord(key: String, title: String) -> CaptureEvent {
