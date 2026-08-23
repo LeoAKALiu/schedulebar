@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SQLite3
 
@@ -22,6 +23,7 @@ final class SQLiteDatabase {
         try exec("PRAGMA journal_mode=DELETE;")
         try exec("PRAGMA busy_timeout=5000;")
         try migrate()
+        chmod(url.path, 0o600)
     }
 
     deinit {

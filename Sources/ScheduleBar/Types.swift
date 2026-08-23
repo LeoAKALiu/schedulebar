@@ -33,6 +33,11 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
     public var dateKind: DateKind?
     public var ownerName: String?
     public var ownerKind: OwnerKind?
+    public var conversation: String?
+    public var attachments: String?
+    public var toolOutput: String?
+    public var reasoning: String?
+    public var apiKey: String?
 
     public init(
         idempotencyKey: String,
@@ -50,20 +55,70 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         ownerKind: OwnerKind? = nil
     ) {
         self.idempotencyKey = idempotencyKey
-        self.title = title
+        self.title = Retention.sanitize(title)
         self.authority = authority
         self.threadID = threadID
         self.turnID = turnID
         self.messageTime = messageTime
         self.workingDirectory = workingDirectory
-        self.triggerPhrase = String(triggerPhrase.prefix(200))
-        self.excerpt = String(excerpt.prefix(280))
+        self.triggerPhrase = Retention.sanitize(String(triggerPhrase.prefix(200)))
+        self.excerpt = Retention.sanitize(String(excerpt.prefix(280)))
         let phrase = datePhrase?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.datePhrase = (phrase?.isEmpty == false) ? phrase : nil
         self.dateKind = dateKind
         let owner = ownerName?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.ownerName = (owner?.isEmpty == false) ? owner : nil
         self.ownerKind = ownerKind
+        self.conversation = nil
+        self.attachments = nil
+        self.toolOutput = nil
+        self.reasoning = nil
+        self.apiKey = nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case idempotencyKey, title, authority, threadID, turnID, messageTime
+        case workingDirectory, triggerPhrase, excerpt
+        case datePhrase, dateKind, ownerName, ownerKind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        idempotencyKey = try container.decode(String.self, forKey: .idempotencyKey)
+        title = Retention.sanitize(try container.decode(String.self, forKey: .title))
+        authority = try container.decode(SourceAuthority.self, forKey: .authority)
+        threadID = try container.decode(String.self, forKey: .threadID)
+        turnID = try container.decode(String.self, forKey: .turnID)
+        messageTime = try container.decode(Date.self, forKey: .messageTime)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        triggerPhrase = Retention.sanitize(try container.decode(String.self, forKey: .triggerPhrase))
+        excerpt = Retention.sanitize(try container.decode(String.self, forKey: .excerpt))
+        datePhrase = try container.decodeIfPresent(String.self, forKey: .datePhrase)
+        dateKind = try container.decodeIfPresent(DateKind.self, forKey: .dateKind)
+        ownerName = try container.decodeIfPresent(String.self, forKey: .ownerName)
+        ownerKind = try container.decodeIfPresent(OwnerKind.self, forKey: .ownerKind)
+        conversation = nil
+        attachments = nil
+        toolOutput = nil
+        reasoning = nil
+        apiKey = nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(title, forKey: .title)
+        try container.encode(authority, forKey: .authority)
+        try container.encode(threadID, forKey: .threadID)
+        try container.encode(turnID, forKey: .turnID)
+        try container.encode(messageTime, forKey: .messageTime)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(triggerPhrase, forKey: .triggerPhrase)
+        try container.encode(excerpt, forKey: .excerpt)
+        try container.encodeIfPresent(datePhrase, forKey: .datePhrase)
+        try container.encodeIfPresent(dateKind, forKey: .dateKind)
+        try container.encodeIfPresent(ownerName, forKey: .ownerName)
+        try container.encodeIfPresent(ownerKind, forKey: .ownerKind)
     }
 }
 
@@ -171,6 +226,7 @@ public enum InputEvent: Equatable, Sendable {
     case setPriority(UUID, BusinessPriority)
     case setRecurrence(UUID, RecurrenceRule)
     case stopRecurrence(UUID)
+    case exportBackup(URL)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {

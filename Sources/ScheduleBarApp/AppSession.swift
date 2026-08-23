@@ -142,6 +142,17 @@ final class AppSession: ObservableObject {
         refresh()
     }
 
+    func exportBackup() {
+        errorMessage = nil
+        do {
+            let url = try ScheduleBarPaths.backupURL()
+            _ = try store.apply(.exportBackup(url), authority: .human)
+            refresh()
+        } catch {
+            errorMessage = "Could not export backup."
+        }
+    }
+
     func refresh() {
         do {
             _ = store.processDueReminders()

@@ -105,6 +105,9 @@ public final class ScheduleBarStore {
         case .stopRecurrence(let seriesID):
             try requireHuman(authority)
             return try stopRecurrence(seriesID)
+        case .exportBackup(let url):
+            try requireHuman(authority)
+            return try exportBackup(to: url)
         }
     }
 
@@ -336,7 +339,7 @@ public final class ScheduleBarStore {
     }
 
     private func quickAdd(_ input: QuickAddInput) throws -> Receipt {
-        let title = input.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = Retention.sanitize(input.title.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !title.isEmpty else { throw ScheduleBarError.emptyTitle }
         database.lock.lock()
         defer { database.lock.unlock() }
@@ -363,6 +366,8 @@ public final class ScheduleBarStore {
     ) throws -> Receipt {
         let id = id ?? UUID()
         let createdAt = iso(now())
+        let title = Retention.sanitize(title)
+        let notes = Retention.sanitize(notes)
         let resolvedName = ownerName ?? "Me"
         let resolvedKind = ownerKind ?? (resolvedName == "Me" ? .selfPerson : .person)
         let ownerID = try upsertOwner(name: resolvedName, kind: resolvedKind)
@@ -437,7 +442,7 @@ public final class ScheduleBarStore {
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, id.uuidString)
-        database.bind(stmt, 2, title)
+        database.bind(stmt, 2, Retention.sanitize(title))
         database.bind(stmt, 3, inboxKey)
         database.bind(stmt, 4, createdAt)
         database.bind(stmt, 5, projectID?.uuidString)
@@ -667,7 +672,7 @@ public final class ScheduleBarStore {
         database.bind(stmt, 1, UUID().uuidString)
         database.bind(stmt, 2, iso(now()))
         sqlite3_bind_int(stmt, 3, automatic ? 1 : 0)
-        database.bind(stmt, 4, summary)
+        database.bind(stmt, 4, Retention.sanitize(summary))
         database.bind(stmt, 5, action)
         database.bind(stmt, 6, targetID?.uuidString)
         database.bind(stmt, 7, table)
@@ -1354,8 +1359,8 @@ public final class ScheduleBarStore {
         database.bind(stmt, 2, taskID.uuidString)
         database.bind(stmt, 3, evidence.threadID)
         database.bind(stmt, 4, evidence.turnID)
-        database.bind(stmt, 5, evidence.triggerPhrase)
-        database.bind(stmt, 6, evidence.excerpt)
+        database.bind(stmt, 5, Retention.sanitize(evidence.triggerPhrase))
+        database.bind(stmt, 6, Retention.sanitize(evidence.excerpt))
         database.bind(stmt, 7, evidence.workingDirectory)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
@@ -1794,6 +1799,127 @@ public final class ScheduleBarStore {
                     isStopped: sqlite3_column_int(stmt, 5) == 1
                 )
             )
+        }
+        return items
+    }
+
+    private func exportBackup(to url: URL) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let tasks = withProgress(try loadTasks(lifecycle: "active", projectID: nil))
+        let archived = try loadTasks(lifecycle: "archived", projectID: nil)
+        let trash = try loadTasks(lifecycle: "trashed", projectID: nil)
+        let payload: [String: Any] = [
+            "version": 1,
+            "exportedAt": iso(now()),
+            "projects": try loadProjects().map { ["id": $0.id.uuidString, "name": $0.name] },
+            "owners": try loadOwners().map { ["id": $0.id.uuidString, "name": $0.name, "kind": $0.kind.rawValue] },
+            "tasks": jsonTasks(tasks),
+            "milestones": jsonTasks(tasks.filter { $0.kind == .milestone }),
+            "archived": jsonTasks(archived),
+            "trash": jsonTasks(trash),
+            "reminders": try loadAllReminders(),
+            "dependencies": try loadAllDependencies(),
+            "recurrences": try loadRecurrences().map {
+                [
+                    "id": $0.id.uuidString,
+                    "title": $0.title,
+                    "rule": jsonRule($0.rule),
+                    "stopped": $0.isStopped,
+                ] as [String: Any]
+            },
+            "history": try loadHistory().map {
+                [
+                    "id": $0.id.uuidString,
+                    "summary": $0.summary,
+                    "automatic": $0.isAutomatic,
+                    "createdAt": iso($0.createdAt),
+                ] as [String: Any]
+            },
+            "sources": try loadAllSources(),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try appendHistory(summary: "Exported backup", automatic: false, action: "export_backup", targetID: nil, table: "backup")
+        return Receipt(outcome: .recorded, summaryLine: "Exported backup")
+    }
+
+    private func jsonTasks(_ tasks: [TaskSummary]) -> [[String: Any]] {
+        tasks.map { task in
+            var row: [String: Any] = [
+                "id": task.id.uuidString,
+                "title": task.title,
+                "kind": task.kind.rawValue,
+                "status": task.status.rawValue,
+                "priority": task.priority.rawValue,
+                "necessary": task.necessary,
+            ]
+            if let notes = task.notes { row["notes"] = notes }
+            if let owner = task.ownerName { row["owner"] = owner }
+            if let projectID = task.projectID { row["projectID"] = projectID.uuidString }
+            if let parentID = task.parentID { row["parentID"] = parentID.uuidString }
+            if let deadline = task.hardDeadline { row["hardDeadline"] = iso(deadline) }
+            if let planned = task.plannedAt { row["plannedAt"] = iso(planned) }
+            if let phrase = task.datePhrase { row["datePhrase"] = phrase }
+            if let seriesID = task.seriesID { row["seriesID"] = seriesID.uuidString }
+            if let occurrence = task.occurrenceDate { row["occurrence"] = iso(occurrence) }
+            if !task.tags.isEmpty { row["tags"] = task.tags }
+            if !task.blockedByIDs.isEmpty { row["blockedBy"] = task.blockedByIDs.map(\.uuidString) }
+            return row
+        }
+    }
+
+    private func jsonRule(_ rule: RecurrenceRule) -> String {
+        switch rule {
+        case .daily: return "daily"
+        case .weekly(let weekday): return "weekly:\(weekday)"
+        case .monthly(let day): return "monthly:\(day)"
+        }
+    }
+
+    private func loadAllReminders() throws -> [[String: Any]] {
+        let stmt = try database.prepare("SELECT task_id, fire_at FROM reminders ORDER BY fire_at ASC;")
+        defer { sqlite3_finalize(stmt) }
+        var items: [[String: Any]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let taskID = database.column(stmt, 0), let fireAt = database.column(stmt, 1) else { continue }
+            items.append(["taskID": taskID, "fireAt": fireAt])
+        }
+        return items
+    }
+
+    private func loadAllDependencies() throws -> [[String: Any]] {
+        let stmt = try database.prepare("SELECT task_id, blocker_id FROM task_blockers ORDER BY rowid ASC;")
+        defer { sqlite3_finalize(stmt) }
+        var items: [[String: Any]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let taskID = database.column(stmt, 0), let blockerID = database.column(stmt, 1) else { continue }
+            items.append(["taskID": taskID, "blockedBy": blockerID])
+        }
+        return items
+    }
+
+    private func loadAllSources() throws -> [[String: Any]] {
+        let stmt = try database.prepare(
+            """
+            SELECT task_id, thread_id, turn_id, trigger_phrase, excerpt, working_directory
+            FROM source_links ORDER BY rowid ASC;
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        var items: [[String: Any]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            items.append([
+                "taskID": database.column(stmt, 0) ?? "",
+                "threadID": database.column(stmt, 1) ?? "",
+                "turnID": database.column(stmt, 2) ?? "",
+                "triggerPhrase": database.column(stmt, 3) ?? "",
+                "excerpt": database.column(stmt, 4) ?? "",
+                "workingDirectory": database.column(stmt, 5) ?? "",
+            ])
         }
         return items
     }

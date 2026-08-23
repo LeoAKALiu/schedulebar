@@ -59,6 +59,9 @@ struct MenuBarView: View {
         Button("Open Console") {
             openWindow(id: "console")
         }
+        Button("Export JSON backup") {
+            session.exportBackup()
+        }
         Divider()
         Button("Quit ScheduleBar") {
             NSApplication.shared.terminate(nil)

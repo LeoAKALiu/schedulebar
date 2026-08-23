@@ -12,4 +12,12 @@ public enum ScheduleBarPaths {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appending(path: "schedulebar.sqlite")
     }
+
+    public static func backupURL(now: Date = Date()) throws -> URL {
+        let store = try defaultStoreURL()
+        let directory = store.deletingLastPathComponent().appending(path: "backups", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "-")
+        return directory.appending(path: "schedulebar-\(stamp).json")
+    }
 }

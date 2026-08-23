@@ -71,8 +71,13 @@ struct ConsoleView: View {
             }
         } detail: {
             if selectedSection == .history {
-                Button("Undo last automatic change") {
-                    session.undoAutomatic()
+                VStack(alignment: .leading, spacing: 12) {
+                    Button("Undo last automatic change") {
+                        session.undoAutomatic()
+                    }
+                    Button("Export JSON backup") {
+                        session.exportBackup()
+                    }
                 }
                 .padding()
             } else if case .pending(let path) = selectedSection {
