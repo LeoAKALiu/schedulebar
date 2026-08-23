@@ -180,6 +180,8 @@ final class SQLiteDatabase {
             );
             """
         )
+        try? exec("ALTER TABLE diagnostics ADD COLUMN component TEXT;")
+        try? exec("ALTER TABLE diagnostics ADD COLUMN retryable INTEGER NOT NULL DEFAULT 1;")
         try exec(
             """
             CREATE TABLE IF NOT EXISTS task_blockers (

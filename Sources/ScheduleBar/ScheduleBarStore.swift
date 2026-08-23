@@ -13,6 +13,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private let modelGateway: ModelGateway
     private let secretStore: SecretStore
     private let sessionDirectory: SessionDirectory
+    private let healthEnvironment: HealthEnvironment
+    private let loginItems: LoginItemControlling
 
     public init(
         storeURL: URL,
@@ -21,7 +23,9 @@ public final class ScheduleBarStore: @unchecked Sendable {
         reminderNotifier: ReminderNotifier = SilentReminderNotifier(),
         modelGateway: ModelGateway = SilentModelGateway(),
         secretStore: SecretStore = MemorySecretStore(),
-        sessionDirectory: SessionDirectory = EmptySessionDirectory()
+        sessionDirectory: SessionDirectory = EmptySessionDirectory(),
+        healthEnvironment: HealthEnvironment = StaticHealthEnvironment(),
+        loginItems: LoginItemControlling = MemoryLoginItemController()
     ) throws {
         self.storeURL = storeURL
         self.now = now
@@ -30,6 +34,8 @@ public final class ScheduleBarStore: @unchecked Sendable {
         self.modelGateway = modelGateway
         self.secretStore = secretStore
         self.sessionDirectory = sessionDirectory
+        self.healthEnvironment = healthEnvironment
+        self.loginItems = loginItems
         database = try SQLiteDatabase(url: storeURL)
     }
 
@@ -125,6 +131,14 @@ public final class ScheduleBarStore: @unchecked Sendable {
             return clearModelAPIKey()
         case .reconcileSessions:
             return reconcileSessions()
+        case .retryFailures:
+            return retryFailures()
+        case .setLoginAtStartup(let enabled):
+            try requireHuman(authority)
+            return setLoginAtStartup(enabled)
+        case .exportDiagnostics(let url):
+            try requireHuman(authority)
+            return try exportDiagnostics(to: url)
         }
     }
 
@@ -186,7 +200,10 @@ public final class ScheduleBarStore: @unchecked Sendable {
             plans: try loadPlans(),
             milestones: tasks.filter { $0.kind == .milestone },
             recurrences: try loadRecurrences(),
-            diagnostics: try loadDiagnostics()
+            diagnostics: try loadDiagnostics(),
+            health: try loadHealth(),
+            pendingInboxCount: try pendingInboxCount(),
+            loginAtStartup: loginItems.isEnabled
         )
     }
 
@@ -214,7 +231,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 for title in titles {
                     let cleaned = Retention.sanitize(title.trimmingCharacters(in: .whitespacesAndNewlines))
                     guard !cleaned.isEmpty else { continue }
-                    if try taskTitleExists(cleaned) { continue }
+                    if try taskTitleExists(cleaned) || candidateTitleExists(cleaned) { continue }
                     let candidateID = try insertCandidate(title: cleaned, inboxKey: "model:\(jobID):\(cleaned)", projectID: nil)
                     try appendHistory(
                         summary: "Model candidate: \(cleaned)",
@@ -226,7 +243,7 @@ public final class ScheduleBarStore: @unchecked Sendable {
                 }
                 try markModelJob(jobID, status: "done")
             case .failed(let code, let message):
-                try insertDiagnostic(code: code, message: Retention.sanitize(message))
+                try insertDiagnostic(code: code, message: Retention.sanitize(message), component: "deepseek")
                 try markModelJob(jobID, status: "failed")
             }
         } catch {
@@ -2075,23 +2092,28 @@ public final class ScheduleBarStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
 
-    private func insertDiagnostic(code: String, message: String) throws {
+    private func insertDiagnostic(code: String, message: String, component: String = "") throws {
         let stmt = try database.prepare(
-            "INSERT INTO diagnostics (id, created_at, code, message) VALUES (?, ?, ?, ?);"
+            """
+            INSERT INTO diagnostics (id, created_at, code, message, component, retryable)
+            VALUES (?, ?, ?, ?, ?, 1);
+            """
         )
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, UUID().uuidString)
         database.bind(stmt, 2, iso(now()))
         database.bind(stmt, 3, code)
         database.bind(stmt, 4, Retention.sanitize(message))
+        database.bind(stmt, 5, component)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
     }
 
     private func loadDiagnostics() throws -> [DiagnosticEntry] {
         let stmt = try database.prepare(
-            "SELECT id, code, message FROM diagnostics ORDER BY rowid DESC;"
+            "SELECT id, code, message, created_at, component, retryable FROM diagnostics ORDER BY rowid DESC;"
         )
         defer { sqlite3_finalize(stmt) }
+        let formatter = ISO8601DateFormatter()
         var items: [DiagnosticEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let idText = database.column(stmt, 0),
@@ -2099,7 +2121,14 @@ public final class ScheduleBarStore: @unchecked Sendable {
                   let code = database.column(stmt, 1)
             else { continue }
             items.append(
-                DiagnosticEntry(id: id, code: code, message: database.column(stmt, 2) ?? "")
+                DiagnosticEntry(
+                    id: id,
+                    code: code,
+                    message: database.column(stmt, 2) ?? "",
+                    component: database.column(stmt, 4) ?? "",
+                    retryable: sqlite3_column_int(stmt, 5) == 1,
+                    createdAt: database.column(stmt, 3).flatMap(formatter.date(from:)) ?? now()
+                )
             )
         }
         return items
@@ -2107,6 +2136,13 @@ public final class ScheduleBarStore: @unchecked Sendable {
 
     private func taskTitleExists(_ title: String) throws -> Bool {
         let stmt = try database.prepare("SELECT id FROM tasks WHERE title = ? AND lifecycle = 'active' LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, title)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func candidateTitleExists(_ title: String) throws -> Bool {
+        let stmt = try database.prepare("SELECT id FROM candidates WHERE title = ? AND status = 'open' LIMIT 1;")
         defer { sqlite3_finalize(stmt) }
         database.bind(stmt, 1, title)
         return sqlite3_step(stmt) == SQLITE_ROW
@@ -2181,7 +2217,88 @@ public final class ScheduleBarStore: @unchecked Sendable {
     private func recordDiagnostic(code: String, message: String) {
         database.lock.lock()
         defer { database.lock.unlock() }
-        try? insertDiagnostic(code: code, message: message)
+        try? insertDiagnostic(code: code, message: message, component: "reconcile")
+    }
+
+    private func retryFailures() -> Receipt {
+        resetFailedModelJobs()
+        _ = processInbox()
+        _ = reconcileSessions()
+        return Receipt(outcome: .recorded, summaryLine: "Retried failed operations")
+    }
+
+    private func setLoginAtStartup(_ enabled: Bool) -> Receipt {
+        loginItems.setEnabled(enabled)
+        return Receipt(outcome: .recorded, summaryLine: enabled ? "Login item enabled" : "Login item disabled")
+    }
+
+    private func exportDiagnostics(to url: URL) throws -> Receipt {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        let payload: [String: Any] = [
+            "version": 1,
+            "exportedAt": iso(now()),
+            "components": try loadHealth().map {
+                ["name": $0.name, "ok": $0.ok, "detail": $0.detail] as [String: Any]
+            },
+            "errors": try loadDiagnostics().map {
+                [
+                    "code": $0.code,
+                    "component": $0.component,
+                    "retryable": $0.retryable,
+                    "createdAt": iso($0.createdAt),
+                    "message": $0.message,
+                ] as [String: Any]
+            },
+            "pendingInbox": try pendingInboxCount(),
+            "pendingModelJobs": try failedOrPendingModelJobCount(),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return Receipt(outcome: .recorded, summaryLine: "Exported diagnostics")
+    }
+
+    private func loadHealth() throws -> [ComponentStatus] {
+        let pending = try pendingInboxCount()
+        let reconcileError = try loadDiagnostics().contains { $0.code == "session_unreadable" && $0.retryable }
+        let deepseek = secretStore.loadAPIKey() == nil ? "not configured (optional)" : "configured"
+        return [
+            ComponentStatus(name: "plugin", ok: healthEnvironment.pluginPresent, detail: healthEnvironment.pluginPresent ? "installed" : "plugin bundle missing"),
+            ComponentStatus(name: "mcp", ok: healthEnvironment.mcpPresent, detail: healthEnvironment.mcpPresent ? "present" : "schedulebar-mcp missing"),
+            ComponentStatus(name: "queue", ok: true, detail: "\(pending) pending"),
+            ComponentStatus(name: "sqlite", ok: true, detail: "local"),
+            ComponentStatus(name: "deepseek", ok: true, detail: deepseek),
+            ComponentStatus(
+                name: "notifications",
+                ok: healthEnvironment.notificationsAuthorized,
+                detail: healthEnvironment.notificationsAuthorized ? "authorized" : healthEnvironment.notificationGuidance
+            ),
+            ComponentStatus(name: "chatwork", ok: true, detail: "explicit only"),
+            ComponentStatus(name: "reconcile", ok: !reconcileError, detail: reconcileError ? "retryable read error" : "local sync"),
+            ComponentStatus(name: "loginitem", ok: true, detail: loginItems.isEnabled ? "enabled" : "disabled"),
+        ]
+    }
+
+    private func pendingInboxCount() throws -> Int {
+        let stmt = try database.prepare("SELECT COUNT(*) FROM capture_inbox WHERE status = 'pending';")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    private func failedOrPendingModelJobCount() throws -> Int {
+        let stmt = try database.prepare("SELECT COUNT(*) FROM model_jobs WHERE status IN ('pending', 'failed');")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    private func resetFailedModelJobs() {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try? database.exec("UPDATE model_jobs SET status = 'pending' WHERE status = 'failed';")
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

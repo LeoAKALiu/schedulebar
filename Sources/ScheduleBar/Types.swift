@@ -230,6 +230,9 @@ public enum InputEvent: Equatable, Sendable {
     case setModelAPIKey(String)
     case clearModelAPIKey
     case reconcileSessions
+    case retryFailures
+    case setLoginAtStartup(Bool)
+    case exportDiagnostics(URL)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -514,11 +517,24 @@ public struct DiagnosticEntry: Equatable, Sendable, Identifiable {
     public var id: UUID
     public var code: String
     public var message: String
+    public var component: String
+    public var retryable: Bool
+    public var createdAt: Date
 
-    public init(id: UUID, code: String, message: String) {
+    public init(
+        id: UUID,
+        code: String,
+        message: String,
+        component: String = "",
+        retryable: Bool = true,
+        createdAt: Date = .distantPast
+    ) {
         self.id = id
         self.code = code
         self.message = message
+        self.component = component
+        self.retryable = retryable
+        self.createdAt = createdAt
     }
 }
 
@@ -539,6 +555,9 @@ public struct ObservableState: Equatable, Sendable {
     public var milestones: [TaskSummary]
     public var recurrences: [RecurrenceSeries]
     public var diagnostics: [DiagnosticEntry]
+    public var health: [ComponentStatus]
+    public var pendingInboxCount: Int
+    public var loginAtStartup: Bool
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -566,7 +585,10 @@ public struct ObservableState: Equatable, Sendable {
         plans: [PlanDraft] = [],
         milestones: [TaskSummary] = [],
         recurrences: [RecurrenceSeries] = [],
-        diagnostics: [DiagnosticEntry] = []
+        diagnostics: [DiagnosticEntry] = [],
+        health: [ComponentStatus] = [],
+        pendingInboxCount: Int = 0,
+        loginAtStartup: Bool = false
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -584,6 +606,9 @@ public struct ObservableState: Equatable, Sendable {
         self.milestones = milestones
         self.recurrences = recurrences
         self.diagnostics = diagnostics
+        self.health = health
+        self.pendingInboxCount = pendingInboxCount
+        self.loginAtStartup = loginAtStartup
     }
 }
 

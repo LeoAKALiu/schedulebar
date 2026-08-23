@@ -30,7 +30,9 @@ final class AppSession: ObservableObject {
                 sessionDirectory: FolderSessionDirectory(
                     root: (try? ScheduleBarPaths.sessionDirectory())
                         ?? FileManager.default.temporaryDirectory.appending(path: "schedulebar-sessions")
-                )
+                ),
+                healthEnvironment: DefaultHealthEnvironment(),
+                loginItems: SMAppServiceLoginItem()
             )
         )
     }
@@ -147,6 +149,31 @@ final class AppSession: ObservableObject {
     func stopRecurrence(_ id: UUID) {
         _ = try? store.apply(.stopRecurrence(id), authority: .human)
         refresh()
+    }
+
+    func retryFailures() {
+        _ = try? store.apply(.retryFailures)
+        Task {
+            await store.processModelMisses()
+            refresh()
+        }
+        refresh()
+    }
+
+    func setLoginAtStartup(_ enabled: Bool) {
+        _ = try? store.apply(.setLoginAtStartup(enabled))
+        refresh()
+    }
+
+    func exportDiagnostics() {
+        errorMessage = nil
+        do {
+            let url = try ScheduleBarPaths.diagnosticsURL()
+            _ = try store.apply(.exportDiagnostics(url))
+            refresh()
+        } catch {
+            errorMessage = "Could not export diagnostics."
+        }
     }
 
     func exportBackup() {

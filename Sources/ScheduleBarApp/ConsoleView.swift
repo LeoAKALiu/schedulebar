@@ -24,9 +24,7 @@ struct ConsoleView: View {
                 Text("Plans (\(session.state.plans.count))").tag(ConsoleSection.plans)
                 Text("Milestones (\(session.state.milestones.count))").tag(ConsoleSection.milestones)
                 Text("Recurrence (\(session.state.recurrences.count))").tag(ConsoleSection.recurrence)
-                if !session.state.diagnostics.isEmpty {
-                    Text("Diagnostics (\(session.state.diagnostics.count))").tag(ConsoleSection.diagnostics)
-                }
+                Text("Diagnostics").tag(ConsoleSection.diagnostics)
                 ForEach(session.state.projects) { project in
                     Text(project.progressSummary.map { "\(project.name) — \($0)" } ?? project.name)
                         .tag(ConsoleSection.project(project.id))
@@ -48,12 +46,36 @@ struct ConsoleView: View {
                 }
                 .navigationTitle("History")
             } else if selectedSection == .diagnostics {
-                List(session.state.diagnostics) { item in
-                    VStack(alignment: .leading) {
-                        Text(item.code)
-                        Text(item.message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                List {
+                    Section("Components") {
+                        ForEach(session.state.health) { item in
+                            VStack(alignment: .leading) {
+                                Text("\(item.name): \(item.ok ? "ok" : "attention")")
+                                Text(item.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Section("Queue") {
+                        Text("Pending inbox: \(session.state.pendingInboxCount)")
+                    }
+                    Section("Recent errors") {
+                        ForEach(session.state.diagnostics) { item in
+                            VStack(alignment: .leading) {
+                                Text("\(item.component) \(item.code)")
+                                Text(item.message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(item.retryable ? "retryable" : "logged")
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                    Section("Actions") {
+                        Button("Retry failed operations") { session.retryFailures() }
+                        Toggle("Open at login", isOn: loginBinding)
+                        Button("Export diagnostics") { session.exportDiagnostics() }
                     }
                 }
                 .navigationTitle("Diagnostics")
@@ -145,6 +167,13 @@ struct ConsoleView: View {
         case .all, .history, .pending, .plans, .recurrence, .diagnostics:
             return session.state.consoleTasks
         }
+    }
+
+    private var loginBinding: Binding<Bool> {
+        Binding(
+            get: { session.state.loginAtStartup },
+            set: { session.setLoginAtStartup($0) }
+        )
     }
 
     private var showsEvidence: Bool {
