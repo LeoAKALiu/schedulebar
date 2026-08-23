@@ -1,2 +1,10 @@
 .DS_Store
 /prototype/
+.build/
+.derived/
+.swiftpm/
+.sqlite
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
