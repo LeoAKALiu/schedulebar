@@ -227,6 +227,8 @@ public enum InputEvent: Equatable, Sendable {
     case setRecurrence(UUID, RecurrenceRule)
     case stopRecurrence(UUID)
     case exportBackup(URL)
+    case setModelAPIKey(String)
+    case clearModelAPIKey
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -507,6 +509,18 @@ public struct PlanDraft: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct DiagnosticEntry: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var code: String
+    public var message: String
+
+    public init(id: UUID, code: String, message: String) {
+        self.id = id
+        self.code = code
+        self.message = message
+    }
+}
+
 public struct ObservableState: Equatable, Sendable {
     public var tasks: [TaskSummary]
     public var candidates: [TaskSummary]
@@ -523,6 +537,7 @@ public struct ObservableState: Equatable, Sendable {
     public var plans: [PlanDraft]
     public var milestones: [TaskSummary]
     public var recurrences: [RecurrenceSeries]
+    public var diagnostics: [DiagnosticEntry]
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
@@ -549,7 +564,8 @@ public struct ObservableState: Equatable, Sendable {
         owners: [OwnerSummary] = [],
         plans: [PlanDraft] = [],
         milestones: [TaskSummary] = [],
-        recurrences: [RecurrenceSeries] = []
+        recurrences: [RecurrenceSeries] = [],
+        diagnostics: [DiagnosticEntry] = []
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -566,6 +582,7 @@ public struct ObservableState: Equatable, Sendable {
         self.plans = plans
         self.milestones = milestones
         self.recurrences = recurrences
+        self.diagnostics = diagnostics
     }
 }
 

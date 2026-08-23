@@ -18,6 +18,9 @@ struct ConsoleView: View {
                 Text("Plans (\(session.state.plans.count))").tag(ConsoleSection.plans)
                 Text("Milestones (\(session.state.milestones.count))").tag(ConsoleSection.milestones)
                 Text("Recurrence (\(session.state.recurrences.count))").tag(ConsoleSection.recurrence)
+                if !session.state.diagnostics.isEmpty {
+                    Text("Diagnostics (\(session.state.diagnostics.count))").tag(ConsoleSection.diagnostics)
+                }
                 ForEach(session.state.projects) { project in
                     Text(project.progressSummary.map { "\(project.name) — \($0)" } ?? project.name)
                         .tag(ConsoleSection.project(project.id))
@@ -38,6 +41,16 @@ struct ConsoleView: View {
                     }
                 }
                 .navigationTitle("History")
+            } else if selectedSection == .diagnostics {
+                List(session.state.diagnostics) { item in
+                    VStack(alignment: .leading) {
+                        Text(item.code)
+                        Text(item.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .navigationTitle("Diagnostics")
             } else if selectedSection == .recurrence {
                 List(session.state.recurrences) { series in
                     VStack(alignment: .leading, spacing: 6) {
@@ -123,7 +136,7 @@ struct ConsoleView: View {
         case .project(let id):
             return session.state.consoleTasks.filter { $0.projectID == id }
         case .milestones: return session.state.milestones
-        case .all, .history, .pending, .plans, .recurrence:
+        case .all, .history, .pending, .plans, .recurrence, .diagnostics:
             return session.state.consoleTasks
         }
     }
@@ -148,6 +161,7 @@ private enum ConsoleSection: Hashable {
     case plans
     case milestones
     case recurrence
+    case diagnostics
 }
 
 private struct DirectoryReviewView: View {

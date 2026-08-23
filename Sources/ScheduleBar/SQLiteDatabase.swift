@@ -159,6 +159,20 @@ final class SQLiteDatabase {
                 task_id TEXT NOT NULL,
                 PRIMARY KEY (series_id, occurrence)
             );
+            CREATE TABLE IF NOT EXISTS model_jobs (
+                id TEXT PRIMARY KEY NOT NULL,
+                turn_text TEXT NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS diagnostics (
+                id TEXT PRIMARY KEY NOT NULL,
+                created_at TEXT NOT NULL,
+                code TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
             """
         )
         try exec(

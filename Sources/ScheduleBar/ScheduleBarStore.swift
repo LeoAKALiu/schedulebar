@@ -4,23 +4,29 @@
 import Foundation
 import SQLite3
 
-public final class ScheduleBarStore {
+public final class ScheduleBarStore: @unchecked Sendable {
     private let storeURL: URL
     private let database: SQLiteDatabase
     private let now: @Sendable () -> Date
     private let notifier: DirectoryNotifier
     private let reminderNotifier: ReminderNotifier
+    private let modelGateway: ModelGateway
+    private let secretStore: SecretStore
 
     public init(
         storeURL: URL,
         now: @escaping @Sendable () -> Date = { Date() },
         notifier: DirectoryNotifier = SilentDirectoryNotifier(),
-        reminderNotifier: ReminderNotifier = SilentReminderNotifier()
+        reminderNotifier: ReminderNotifier = SilentReminderNotifier(),
+        modelGateway: ModelGateway = SilentModelGateway(),
+        secretStore: SecretStore = MemorySecretStore()
     ) throws {
         self.storeURL = storeURL
         self.now = now
         self.notifier = notifier
         self.reminderNotifier = reminderNotifier
+        self.modelGateway = modelGateway
+        self.secretStore = secretStore
         database = try SQLiteDatabase(url: storeURL)
     }
 
@@ -108,6 +114,12 @@ public final class ScheduleBarStore {
         case .exportBackup(let url):
             try requireHuman(authority)
             return try exportBackup(to: url)
+        case .setModelAPIKey(let key):
+            try requireHuman(authority)
+            return try setModelAPIKey(key)
+        case .clearModelAPIKey:
+            try requireHuman(authority)
+            return clearModelAPIKey()
         }
     }
 
@@ -168,8 +180,53 @@ public final class ScheduleBarStore {
             owners: try loadOwners(),
             plans: try loadPlans(),
             milestones: tasks.filter { $0.kind == .milestone },
-            recurrences: try loadRecurrences()
+            recurrences: try loadRecurrences(),
+            diagnostics: try loadDiagnostics()
         )
+    }
+
+    public func processModelMisses() async {
+        let jobs = pendingModelJobs()
+        let apiKey = secretStore.loadAPIKey()
+        for job in jobs {
+            let result = await modelGateway.detectMissedCandidates(job.request, apiKey: apiKey)
+            recordModelResult(jobID: job.id, result)
+        }
+    }
+
+    private func pendingModelJobs() -> [(id: String, request: MissedCandidateRequest)] {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        return (try? loadPendingModelJobs()) ?? []
+    }
+
+    private func recordModelResult(jobID: String, _ result: ModelMissResult) {
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        do {
+            switch result {
+            case .candidates(let titles):
+                for title in titles {
+                    let cleaned = Retention.sanitize(title.trimmingCharacters(in: .whitespacesAndNewlines))
+                    guard !cleaned.isEmpty else { continue }
+                    if try taskTitleExists(cleaned) { continue }
+                    let candidateID = try insertCandidate(title: cleaned, inboxKey: "model:\(jobID):\(cleaned)", projectID: nil)
+                    try appendHistory(
+                        summary: "Model candidate: \(cleaned)",
+                        automatic: true,
+                        action: "model_candidate",
+                        targetID: candidateID,
+                        table: "candidates"
+                    )
+                }
+                try markModelJob(jobID, status: "done")
+            case .failed(let code, let message):
+                try insertDiagnostic(code: code, message: Retention.sanitize(message))
+                try markModelJob(jobID, status: "failed")
+            }
+        } catch {
+            return
+        }
     }
 
     public func processRecurrences() -> Int {
@@ -319,6 +376,7 @@ public final class ScheduleBarStore {
             case .ignored, .duplicate, .notRecorded:
                 break
             }
+            try enqueueModelJob(event)
             let stmt = try database.prepare(
                 "UPDATE capture_inbox SET status = 'processed', task_id = ? WHERE idempotency_key = ?;"
             )
@@ -1922,6 +1980,105 @@ public final class ScheduleBarStore {
             ])
         }
         return items
+    }
+
+    private func setModelAPIKey(_ key: String) throws -> Receipt {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw ScheduleBarError.emptyTitle }
+        secretStore.saveAPIKey(trimmed)
+        database.lock.lock()
+        defer { database.lock.unlock() }
+        try appendHistory(summary: "Configured model key", automatic: false, action: "set_model_key", targetID: nil, table: "settings")
+        return Receipt(outcome: .recorded, summaryLine: "Configured model key")
+    }
+
+    private func clearModelAPIKey() -> Receipt {
+        secretStore.deleteAPIKey()
+        return Receipt(outcome: .recorded, summaryLine: "Cleared model key")
+    }
+
+    private func enqueueModelJob(_ event: CaptureEvent) throws {
+        let turnText = Retention.sanitize(
+            String("\(event.title)\n\(event.excerpt)".prefix(500))
+        )
+        guard !turnText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let stmt = try database.prepare(
+            "INSERT INTO model_jobs (id, turn_text, thread_id, turn_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?);"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, UUID().uuidString)
+        database.bind(stmt, 2, turnText)
+        database.bind(stmt, 3, event.threadID)
+        database.bind(stmt, 4, event.turnID)
+        database.bind(stmt, 5, iso(now()))
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+    }
+
+    private func loadPendingModelJobs() throws -> [(id: String, request: MissedCandidateRequest)] {
+        let stmt = try database.prepare(
+            "SELECT id, turn_text, thread_id, turn_id FROM model_jobs WHERE status = 'pending' ORDER BY rowid ASC;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        var jobs: [(String, MissedCandidateRequest)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let id = database.column(stmt, 0), let text = database.column(stmt, 1) else { continue }
+            jobs.append(
+                (
+                    id,
+                    MissedCandidateRequest(
+                        turnText: text,
+                        threadID: database.column(stmt, 2) ?? "",
+                        turnID: database.column(stmt, 3) ?? ""
+                    )
+                )
+            )
+        }
+        return jobs
+    }
+
+    private func markModelJob(_ id: String, status: String) throws {
+        let stmt = try database.prepare("UPDATE model_jobs SET status = ? WHERE id = ?;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, status)
+        database.bind(stmt, 2, id)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+    }
+
+    private func insertDiagnostic(code: String, message: String) throws {
+        let stmt = try database.prepare(
+            "INSERT INTO diagnostics (id, created_at, code, message) VALUES (?, ?, ?, ?);"
+        )
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, UUID().uuidString)
+        database.bind(stmt, 2, iso(now()))
+        database.bind(stmt, 3, code)
+        database.bind(stmt, 4, Retention.sanitize(message))
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw ScheduleBarError.storeUnavailable }
+    }
+
+    private func loadDiagnostics() throws -> [DiagnosticEntry] {
+        let stmt = try database.prepare(
+            "SELECT id, code, message FROM diagnostics ORDER BY rowid DESC;"
+        )
+        defer { sqlite3_finalize(stmt) }
+        var items: [DiagnosticEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let idText = database.column(stmt, 0),
+                  let id = UUID(uuidString: idText),
+                  let code = database.column(stmt, 1)
+            else { continue }
+            items.append(
+                DiagnosticEntry(id: id, code: code, message: database.column(stmt, 2) ?? "")
+            )
+        }
+        return items
+    }
+
+    private func taskTitleExists(_ title: String) throws -> Bool {
+        let stmt = try database.prepare("SELECT id FROM tasks WHERE title = ? AND lifecycle = 'active' LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        database.bind(stmt, 1, title)
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     private func decode(_ payload: String) throws -> CaptureEvent {

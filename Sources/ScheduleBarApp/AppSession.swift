@@ -23,7 +23,9 @@ final class AppSession: ObservableObject {
             store: ScheduleBarStore(
                 storeURL: StoreLocation.fileURL(),
                 notifier: AppDirectoryNotifier(),
-                reminderNotifier: AppReminderNotifier()
+                reminderNotifier: AppReminderNotifier(),
+                modelGateway: HTTPModelGateway(),
+                secretStore: KeychainSecretStore()
             )
         )
     }
@@ -167,6 +169,7 @@ final class AppSession: ObservableObject {
     private func startReminderPolling() {
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                await self?.store.processModelMisses()
                 self?.refresh()
             }
         }
