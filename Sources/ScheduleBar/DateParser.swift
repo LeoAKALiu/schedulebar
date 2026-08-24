@@ -18,6 +18,33 @@ struct ParsedDate: Equatable, Sendable {
 
 enum DateParser {
     static let timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    static let vagueTokens = [
+        "soon", "later", "someday", "sometime", "whenever", "eventually", "shortly", "asap",
+        "尽快", "之后", "以后", "有空", "改天", "最近", "回头", "有时间",
+    ]
+
+    static func firstSupportedPhrase(in text: String) -> String? {
+        let englishSimple = ["today", "tomorrow", "yesterday"] + vagueTokens.filter { $0.allSatisfy(\.isASCII) }
+        let chineseSimple = ["今天", "明天", "昨天", "后天"] + vagueTokens.filter { !$0.allSatisfy(\.isASCII) }
+        let patterns = [
+            #"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b"#,
+            #"\b\d{4}-\d{2}-\d{2}\b"#,
+            #"\b(?:next|this)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#,
+            #"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"#,
+            #"(?:下周[一二三四五六日天]|这周[一二三四五六日天]|周[一二三四五六日天]|星期[一二三四五六日天])"#,
+            "\\b(?:\(englishSimple.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")))\\b",
+            "(?:\(chineseSimple.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")))",
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  let swiftRange = Range(match.range, in: text)
+            else { continue }
+            return String(text[swiftRange])
+        }
+        return nil
+    }
 
     static func calendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -33,7 +60,7 @@ enum DateParser {
         guard let raw else { return nil }
         let phrase = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !phrase.isEmpty else { return nil }
-        let kind = kind ?? .hardDeadline
+        let kind = kind ?? .planned
         let token = normalize(phrase)
         if isVague(token) {
             return ParsedDate(
@@ -60,6 +87,9 @@ enum DateParser {
         if token == "后天" {
             guard let day = shanghai.date(byAdding: .day, value: 2, to: shanghai.startOfDay(for: anchor)) else { return vague(kind: kind, phrase: phrase, anchor: anchor) }
             return resolved(kind: kind, phrase: phrase, anchor: anchor, instant: day, precision: .allDay)
+        }
+        if let instant = parseWeekday(token, at: shanghai.startOfDay(for: anchor)) {
+            return resolved(kind: kind, phrase: phrase, anchor: anchor, instant: instant, precision: .allDay)
         }
         if let instant = parseAllDay(token) {
             return resolved(kind: kind, phrase: phrase, anchor: anchor, instant: instant, precision: .allDay)
@@ -123,6 +153,17 @@ enum DateParser {
         task.hardDeadline ?? task.targetDate ?? task.plannedAt ?? task.followUpAt
     }
 
+    static func dateUrgency(for task: TaskSummary, now: Date) -> DateUrgency {
+        if task.isOverdue { return .overdue }
+        switch menuBucket(for: task, now: now) {
+        case .today: return .today
+        case .nextSevenDays: return .soon
+        case .overdue: return .overdue
+        case nil:
+            return groupingInstant(for: task) == nil ? .none : .later
+        }
+    }
+
     private static func resolved(
         kind: DateKind,
         phrase: String,
@@ -142,10 +183,62 @@ enum DateParser {
     }
 
     private static func isVague(_ token: String) -> Bool {
-        [
-            "soon", "later", "someday", "sometime", "whenever", "eventually", "shortly", "asap",
-            "尽快", "之后", "以后", "有空", "改天", "最近", "回头", "有时间",
-        ].contains(token)
+        vagueTokens.contains(token)
+    }
+
+    private static func parseWeekday(_ token: String, at start: Date) -> Date? {
+        let nextWeekPrefixes = ["next ", "下"]
+        var remainder = token
+        var nextWeek = false
+        if remainder.hasPrefix("this ") {
+            remainder = String(remainder.dropFirst(5))
+        }
+        if remainder.hasPrefix("这") {
+            remainder = String(remainder.dropFirst(1))
+        }
+        for prefix in nextWeekPrefixes where remainder.hasPrefix(prefix) {
+            nextWeek = true
+            remainder = String(remainder.dropFirst(prefix.count))
+            break
+        }
+        guard let weekday = weekdayNumber(remainder) else { return nil }
+        if nextWeek {
+            return weekdayOfNextWeek(weekday, from: start)
+        }
+        return nextOccurrence(of: weekday, from: start, includingToday: true)
+    }
+
+    private static func weekdayNumber(_ token: String) -> Int? {
+        switch token {
+        case "sunday", "sun", "周日", "星期日", "星期天": return 1
+        case "monday", "mon", "周一", "星期一": return 2
+        case "tuesday", "tue", "周二", "星期二": return 3
+        case "wednesday", "wed", "周三", "星期三": return 4
+        case "thursday", "thu", "周四", "星期四": return 5
+        case "friday", "fri", "周五", "星期五": return 6
+        case "saturday", "sat", "周六", "星期六": return 7
+        default: return nil
+        }
+    }
+
+    private static func nextOccurrence(of weekday: Int, from start: Date, includingToday: Bool) -> Date? {
+        let shanghai = calendar()
+        let current = shanghai.component(.weekday, from: start)
+        var delta = weekday - current
+        if delta < 0 { delta += 7 }
+        if delta == 0 && !includingToday { delta = 7 }
+        return shanghai.date(byAdding: .day, value: delta, to: start)
+    }
+
+    private static func weekdayOfNextWeek(_ weekday: Int, from start: Date) -> Date? {
+        let shanghai = calendar()
+        let current = shanghai.component(.weekday, from: start)
+        let daysFromMonday = (current + 5) % 7
+        guard let thisMonday = shanghai.date(byAdding: .day, value: -daysFromMonday, to: start),
+              let nextMonday = shanghai.date(byAdding: .day, value: 7, to: thisMonday)
+        else { return nil }
+        let mondayBased = (weekday + 5) % 7
+        return shanghai.date(byAdding: .day, value: mondayBased, to: nextMonday)
     }
 
     private static func parseAllDay(_ token: String) -> Date? {

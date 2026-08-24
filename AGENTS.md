@@ -11,6 +11,20 @@ make plugin      # copy schedulebar-mcp into Plugins/schedulebar/bin
 
 Default `DEVELOPER_DIR` is `/Applications/Xcode-beta.app/Contents/Developer`.
 
+## Chat / Work capture
+
+Ordinary Chat/Work does **not** capture automatically. There is no clipboard, browser, or Accessibility listener.
+
+To record from Chat/Work, the user must explicitly say “record as task” / “记录为任务” (or use Quick Add). The local handoff is:
+
+```
+schedulebar-mcp record --text "record as task File the weekly report" --key <idempotency-key> --cwd <dir>
+```
+
+or the MCP tool `record_as_task`. Success, duplicate, and failure receipts are explicit; failure reason is `未记录`. Codex lifecycle hooks remain the automatic path.
+
+Remote or cloud Codex sessions are **not** captured in realtime. After they have been synced to `Application Support/ScheduleBar/sessions/` as JSONL, ScheduleBar reconciles locally with a persistent cursor. Drop files there; unreadability is a retryable diagnostic and does not block the app.
+
 ## Agent skills
 
 ### Issue tracker

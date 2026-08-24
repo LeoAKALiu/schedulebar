@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct ScheduleBarApp: App {
     @StateObject private var session: AppSession
+    @Environment(\.openWindow) private var openWindow
 
     init() {
         let session: AppSession
@@ -28,9 +29,16 @@ struct ScheduleBarApp: App {
         Window("ScheduleBar", id: "console") {
             ConsoleView(session: session)
                 .frame(minWidth: 720, minHeight: 420)
+                .onReceive(NotificationCenter.default.publisher(for: AppDirectoryNotifier.openConsoleNotification)) { _ in
+                    openWindow(id: "console")
+                }
         }
         Window("Quick Add", id: "quick-add") {
             QuickAddView(session: session)
+        }
+        .windowResizability(.contentSize)
+        Window("Edit Candidate", id: "candidate-edit") {
+            CandidateEditView(session: session)
         }
         .windowResizability(.contentSize)
     }

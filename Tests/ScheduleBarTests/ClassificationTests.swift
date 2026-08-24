@@ -95,8 +95,4 @@ private func event(key: String, title: String, phrase: String) -> CaptureEvent {
     )
 }
 
-private func uniqueStoreURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appending(path: "ScheduleBarTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        .appending(path: "schedulebar.sqlite")
-}
+private func uniqueStoreURL() -> URL { TestFixtures.uniqueStoreURL() }

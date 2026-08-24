@@ -1,7 +1,7 @@
 {
   "name": "schedulebar",
   "version": "0.1.0",
-  "description": "Capture explicit Codex 'record as task' requests into ScheduleBar.",
+  "description": "Capture Codex commitments and explicit task requests into ScheduleBar.",
   "author": {
     "name": "ScheduleBar"
   },
@@ -12,7 +12,7 @@
   "interface": {
     "displayName": "ScheduleBar",
     "shortDescription": "Record Codex tasks into the local ScheduleBar app",
-    "longDescription": "ScheduleBar plugin ships lifecycle hooks and an MCP tool that appends explicit record-as-task events to a durable local queue. It does not modify user-level Codex hooks.",
+    "longDescription": "ScheduleBar plugin ships Codex lifecycle hooks plus MCP tools that append explicit record-as-task events to a durable local queue. Ordinary Chat/Work is not captured automatically; those sessions must use the record_as_task tool or `schedulebar-mcp record`. It does not modify user-level Codex hooks and does not monitor clipboard, browser, or Accessibility APIs.",
     "developerName": "ScheduleBar",
     "category": "Productivity",
     "capabilities": ["Write"],

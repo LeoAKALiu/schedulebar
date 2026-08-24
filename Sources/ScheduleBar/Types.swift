@@ -50,14 +50,14 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         ownerKind: OwnerKind? = nil
     ) {
         self.idempotencyKey = idempotencyKey
-        self.title = title
+        self.title = Retention.sanitize(title)
         self.authority = authority
         self.threadID = threadID
         self.turnID = turnID
         self.messageTime = messageTime
         self.workingDirectory = workingDirectory
-        self.triggerPhrase = String(triggerPhrase.prefix(200))
-        self.excerpt = String(excerpt.prefix(280))
+        self.triggerPhrase = Retention.sanitize(String(triggerPhrase.prefix(200)))
+        self.excerpt = Retention.sanitize(String(excerpt.prefix(280)))
         let phrase = datePhrase?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.datePhrase = (phrase?.isEmpty == false) ? phrase : nil
         self.dateKind = dateKind
@@ -65,12 +65,67 @@ public struct CaptureEvent: Equatable, Sendable, Codable {
         self.ownerName = (owner?.isEmpty == false) ? owner : nil
         self.ownerKind = ownerKind
     }
+
+    enum CodingKeys: String, CodingKey {
+        case idempotencyKey, title, authority, threadID, turnID, messageTime
+        case workingDirectory, triggerPhrase, excerpt
+        case datePhrase, dateKind, ownerName, ownerKind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        idempotencyKey = try container.decode(String.self, forKey: .idempotencyKey)
+        title = Retention.sanitize(try container.decode(String.self, forKey: .title))
+        authority = try container.decode(SourceAuthority.self, forKey: .authority)
+        threadID = try container.decode(String.self, forKey: .threadID)
+        turnID = try container.decode(String.self, forKey: .turnID)
+        messageTime = try container.decode(Date.self, forKey: .messageTime)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        triggerPhrase = Retention.sanitize(try container.decode(String.self, forKey: .triggerPhrase))
+        excerpt = Retention.sanitize(try container.decode(String.self, forKey: .excerpt))
+        datePhrase = try container.decodeIfPresent(String.self, forKey: .datePhrase)
+        dateKind = try container.decodeIfPresent(DateKind.self, forKey: .dateKind)
+        ownerName = try container.decodeIfPresent(String.self, forKey: .ownerName)
+        ownerKind = try container.decodeIfPresent(OwnerKind.self, forKey: .ownerKind)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(title, forKey: .title)
+        try container.encode(authority, forKey: .authority)
+        try container.encode(threadID, forKey: .threadID)
+        try container.encode(turnID, forKey: .turnID)
+        try container.encode(messageTime, forKey: .messageTime)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(triggerPhrase, forKey: .triggerPhrase)
+        try container.encode(excerpt, forKey: .excerpt)
+        try container.encodeIfPresent(datePhrase, forKey: .datePhrase)
+        try container.encodeIfPresent(dateKind, forKey: .dateKind)
+        try container.encodeIfPresent(ownerName, forKey: .ownerName)
+        try container.encodeIfPresent(ownerKind, forKey: .ownerKind)
+    }
 }
 
 public enum OwnerKind: String, Codable, Equatable, Sendable {
     case selfPerson = "self"
     case person
     case agent
+}
+
+public enum BusinessPriority: String, Codable, Equatable, Sendable {
+    case low
+    case normal
+    case high
+    case critical
+}
+
+public enum DateUrgency: String, Codable, Equatable, Sendable {
+    case none
+    case later
+    case soon
+    case today
+    case overdue
 }
 
 public enum WorkflowStatus: String, Codable, Equatable, Sendable {
@@ -108,8 +163,29 @@ public enum DatePrecision: String, Codable, Equatable, Sendable {
     case vague
 }
 
+public enum RecurrenceRule: Equatable, Sendable, Codable {
+    case daily
+    case weekly(weekday: Int)
+    case monthly(day: Int)
+}
+
+public struct RecurrenceSeries: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var title: String
+    public var rule: RecurrenceRule
+    public var isStopped: Bool
+
+    public init(id: UUID, title: String, rule: RecurrenceRule, isStopped: Bool) {
+        self.id = id
+        self.title = title
+        self.rule = rule
+        self.isStopped = isStopped
+    }
+}
+
 public enum InputEvent: Equatable, Sendable {
     case quickAdd(QuickAddInput)
+    case editTask(UUID, QuickAddInput)
     case capture(CaptureEvent)
     case reviewCandidate(UUID, CandidateDecision)
     case cancel(UUID)
@@ -131,6 +207,18 @@ public enum InputEvent: Equatable, Sendable {
     case acceptPlan(UUID, [UUID])
     case rejectPlan(UUID)
     case linkSource(UUID, SourceEvidence)
+    case setBlockedBy(UUID, UUID)
+    case removeBlockedBy(UUID, UUID)
+    case setPriority(UUID, BusinessPriority)
+    case setRecurrence(UUID, RecurrenceRule)
+    case stopRecurrence(UUID)
+    case exportBackup(URL)
+    case setModelAPIKey(String)
+    case clearModelAPIKey
+    case reconcileSessions
+    case retryFailures
+    case setLoginAtStartup(Bool)
+    case exportDiagnostics(URL)
 }
 
 public enum DirectoryDecision: Equatable, Sendable {
@@ -223,6 +311,12 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
     public var parentID: UUID?
     public var necessary: Bool
     public var progressSummary: String?
+    public var priority: BusinessPriority
+    public var dateUrgency: DateUrgency
+    public var blockedByIDs: [UUID]
+    public var hasUnsatisfiedBlockers: Bool
+    public var seriesID: UUID?
+    public var occurrenceDate: Date?
 
     public init(
         id: UUID,
@@ -245,7 +339,13 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         kind: WorkKind = .task,
         parentID: UUID? = nil,
         necessary: Bool = true,
-        progressSummary: String? = nil
+        progressSummary: String? = nil,
+        priority: BusinessPriority = .normal,
+        dateUrgency: DateUrgency = .none,
+        blockedByIDs: [UUID] = [],
+        hasUnsatisfiedBlockers: Bool = false,
+        seriesID: UUID? = nil,
+        occurrenceDate: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -268,6 +368,12 @@ public struct TaskSummary: Equatable, Sendable, Identifiable {
         self.parentID = parentID
         self.necessary = necessary
         self.progressSummary = progressSummary
+        self.priority = priority
+        self.dateUrgency = dateUrgency
+        self.blockedByIDs = blockedByIDs
+        self.hasUnsatisfiedBlockers = hasUnsatisfiedBlockers
+        self.seriesID = seriesID
+        self.occurrenceDate = occurrenceDate
     }
 }
 
@@ -312,19 +418,22 @@ public struct SourceEvidence: Equatable, Sendable {
     public var triggerPhrase: String
     public var excerpt: String
     public var workingDirectory: String
+    public var messageTime: Date?
 
     public init(
         threadID: String,
         turnID: String,
         triggerPhrase: String,
         excerpt: String,
-        workingDirectory: String
+        workingDirectory: String,
+        messageTime: Date? = nil
     ) {
         self.threadID = threadID
         self.turnID = turnID
         self.triggerPhrase = String(triggerPhrase.prefix(200))
         self.excerpt = String(excerpt.prefix(280))
         self.workingDirectory = workingDirectory
+        self.messageTime = messageTime
     }
 }
 
@@ -367,19 +476,22 @@ public struct PlanProposal: Equatable, Sendable, Codable {
     public var turnID: String
     public var workingDirectory: String
     public var items: [PlanItem]
+    public var messageTime: Date
 
     public init(
         idempotencyKey: String,
         threadID: String,
         turnID: String,
         workingDirectory: String,
-        items: [PlanItem]
+        items: [PlanItem],
+        messageTime: Date = Date()
     ) {
         self.idempotencyKey = idempotencyKey
         self.threadID = threadID
         self.turnID = turnID
         self.workingDirectory = workingDirectory
         self.items = items
+        self.messageTime = messageTime
     }
 }
 
@@ -390,6 +502,31 @@ public struct PlanDraft: Equatable, Sendable, Identifiable {
     public init(id: UUID, items: [PlanItem]) {
         self.id = id
         self.items = items
+    }
+}
+
+public struct DiagnosticEntry: Equatable, Sendable, Identifiable {
+    public var id: UUID
+    public var code: String
+    public var message: String
+    public var component: String
+    public var retryable: Bool
+    public var createdAt: Date
+
+    public init(
+        id: UUID,
+        code: String,
+        message: String,
+        component: String = "",
+        retryable: Bool = true,
+        createdAt: Date = .distantPast
+    ) {
+        self.id = id
+        self.code = code
+        self.message = message
+        self.component = component
+        self.retryable = retryable
+        self.createdAt = createdAt
     }
 }
 
@@ -408,12 +545,18 @@ public struct ObservableState: Equatable, Sendable {
     public var owners: [OwnerSummary]
     public var plans: [PlanDraft]
     public var milestones: [TaskSummary]
+    public var recurrences: [RecurrenceSeries]
+    public var diagnostics: [DiagnosticEntry]
+    public var health: [ComponentStatus]
+    public var pendingInboxCount: Int
+    public var loginAtStartup: Bool
 
     public var menuTasks: [TaskSummary] { tasks }
     public var consoleTasks: [TaskSummary] { tasks }
     public var candidateCount: Int { candidates.count }
     public var todayCount: Int { today.count }
     public var overdueCount: Int { overdue.count }
+    public var nextSevenDaysCount: Int { nextSevenDays.count }
     public var unscheduledMenuTasks: [TaskSummary] {
         let grouped = Set(overdue.map(\.id) + today.map(\.id) + nextSevenDays.map(\.id) + waitingOnOthers.map(\.id))
         return menuTasks.filter { !grouped.contains($0.id) && $0.status != .completed && $0.status != .cancelled }
@@ -433,7 +576,12 @@ public struct ObservableState: Equatable, Sendable {
         waitingOnOthers: [TaskSummary] = [],
         owners: [OwnerSummary] = [],
         plans: [PlanDraft] = [],
-        milestones: [TaskSummary] = []
+        milestones: [TaskSummary] = [],
+        recurrences: [RecurrenceSeries] = [],
+        diagnostics: [DiagnosticEntry] = [],
+        health: [ComponentStatus] = [],
+        pendingInboxCount: Int = 0,
+        loginAtStartup: Bool = false
     ) {
         self.tasks = tasks
         self.candidates = candidates
@@ -449,6 +597,11 @@ public struct ObservableState: Equatable, Sendable {
         self.owners = owners
         self.plans = plans
         self.milestones = milestones
+        self.recurrences = recurrences
+        self.diagnostics = diagnostics
+        self.health = health
+        self.pendingInboxCount = pendingInboxCount
+        self.loginAtStartup = loginAtStartup
     }
 }
 

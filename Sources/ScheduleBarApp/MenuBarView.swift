@@ -12,6 +12,10 @@ struct MenuBarView: View {
             ForEach(session.state.candidates) { candidate in
                 Menu(candidate.title) {
                     Button("Confirm") { session.confirmCandidate(candidate.id) }
+                    Button("Edit…") {
+                        session.beginEditingCandidate(candidate.id)
+                        openWindow(id: "candidate-edit")
+                    }
                     Button("Reject", role: .destructive) { session.rejectCandidate(candidate.id) }
                 }
             }
@@ -32,7 +36,7 @@ struct MenuBarView: View {
             Divider()
         }
         if !session.state.nextSevenDays.isEmpty {
-            Text("Next 7 days")
+            Text("Next 7 days (\(session.state.nextSevenDaysCount))")
             ForEach(session.state.nextSevenDays) { task in
                 TaskStatusMenu(task: task, session: session)
             }
@@ -53,11 +57,17 @@ struct MenuBarView: View {
             }
         }
         Divider()
+        Text(CapturePolicy.chatWorkHelpText)
+        Text(CapturePolicy.localReconcileHelpText)
+        Divider()
         Button("Quick Add…") {
             openWindow(id: "quick-add")
         }
         Button("Open Console") {
             openWindow(id: "console")
+        }
+        Button("Export JSON backup") {
+            session.exportBackup()
         }
         Divider()
         Button("Quit ScheduleBar") {
@@ -71,7 +81,7 @@ private struct TaskStatusMenu: View {
     @ObservedObject var session: AppSession
 
     var body: some View {
-        Menu(task.title) {
+        Menu(task.hasUnsatisfiedBlockers ? "⛔ \(task.title)" : task.title) {
             Button("Not started") { session.setStatus(task.id, .notStarted) }
             Button("In progress") { session.setStatus(task.id, .inProgress) }
             Button("Waiting on other") { session.setStatus(task.id, .waitingOnOther) }
@@ -80,9 +90,36 @@ private struct TaskStatusMenu: View {
             Button("Complete") { session.setStatus(task.id, .completed) }
             Button("Cancel", role: .destructive) { session.setStatus(task.id, .cancelled) }
             Divider()
+            Button("Priority: low") { session.setPriority(task.id, .low) }
+            Button("Priority: normal") { session.setPriority(task.id, .normal) }
+            Button("Priority: high") { session.setPriority(task.id, .high) }
+            Button("Priority: critical") { session.setPriority(task.id, .critical) }
+            Divider()
             ForEach(session.state.owners) { owner in
                 Button(owner.name) { session.setOwner(task.id, owner) }
             }
+            Divider()
+            Button("Remind in 1 hour") {
+                session.addReminder(task.id, at: Date().addingTimeInterval(3600))
+            }
+            Button("Remind tomorrow at 9:00") {
+                session.addReminder(task.id, at: tomorrowAtNine())
+            }
+            if !session.reminders(for: task.id).isEmpty {
+                Button("Clear reminders", role: .destructive) {
+                    session.setReminders(task.id, [])
+                }
+            }
         }
+    }
+
+    private func tomorrowAtNine() -> Date {
+        var calendar = Calendar.current
+        calendar.timeZone = .current
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        var components = calendar.dateComponents([.year, .month, .day], from: tomorrow)
+        components.hour = 9
+        components.minute = 0
+        return calendar.date(from: components) ?? tomorrow
     }
 }
