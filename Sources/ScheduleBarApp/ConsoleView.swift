@@ -199,6 +199,11 @@ struct ConsoleView: View {
                     Section {
                         ForEach(plan.items) { item in
                             HStack {
+                                Image(systemName: item.parentID == nil ? "circle" : "arrow.turn.down.right")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 14)
+                                    .padding(.leading, item.parentID == nil ? 0 : 14)
                                 Text(item.title)
                                 Spacer()
                                 Button("Accept") {
@@ -289,9 +294,21 @@ struct ConsoleView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Actions") {
-                Button("Retry failed operations") { session.retryFailures() }
+                Button {
+                    session.retryFailures()
+                } label: {
+                    Label("Retry failed operations", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Toggle("Open at login", isOn: loginBinding)
-                Button("Export diagnostics") { session.exportDiagnostics() }
+                Button {
+                    session.exportDiagnostics()
+                } label: {
+                    Label("Export diagnostics", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .formStyle(.grouped)

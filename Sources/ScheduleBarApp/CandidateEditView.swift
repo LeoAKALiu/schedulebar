@@ -129,4 +129,3 @@ struct CandidateEditView: View {
         localPath = candidate.localPath ?? ""
     }
 }
-

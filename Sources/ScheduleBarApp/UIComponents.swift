@@ -16,18 +16,6 @@ extension BusinessPriority: CaseIterable {
     }
 }
 
-extension DateUrgency: CaseIterable {
-    public static var allCases: [DateUrgency] {
-        [.none, .later, .soon, .today, .overdue]
-    }
-}
-
-extension OwnerKind: CaseIterable {
-    public static var allCases: [OwnerKind] {
-        [.selfPerson, .person, .agent]
-    }
-}
-
 // MARK: - WorkflowStatus Extensions
 
 extension WorkflowStatus {

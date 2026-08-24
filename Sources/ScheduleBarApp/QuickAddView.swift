@@ -116,4 +116,3 @@ struct QuickAddView: View {
         }
     }
 }
-
