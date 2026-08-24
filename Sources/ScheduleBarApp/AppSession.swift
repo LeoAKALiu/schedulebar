@@ -185,6 +185,12 @@ final class AppSession: ObservableObject {
         setReminders(id, fires)
     }
 
+    func removeReminder(_ id: TaskSummary.ID, reminderID: UUID) {
+        let current = reminders(for: id)
+        let fires = current.filter { $0.id != reminderID }.map(\.fireAt)
+        setReminders(id, fires)
+    }
+
     func reminders(for id: TaskSummary.ID) -> [Reminder] {
         (try? store.reminders(for: id)) ?? []
     }
