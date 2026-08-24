@@ -430,11 +430,7 @@ struct ConsoleView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: 480)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.red.opacity(0.35), lineWidth: 1)
-        )
+        .glassFloatingBanner(cornerRadius: 10)
         .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
         .padding(.top, 8)
         .transition(.move(edge: .top).combined(with: .opacity))
@@ -661,22 +657,23 @@ private struct TaskDetailView: View {
                 .font(.title2)
                 .fontWeight(.semibold)
                 .lineLimit(2)
-            HStack(spacing: 6) {
-                StatusPillView(status: task.status)
-                PriorityPillView(priority: task.priority)
-                if let dateText {
-                    DatePillView(dateText: dateText, isOverdue: task.isOverdue, isToday: task.dateUrgency == .today)
+            GlassGroup(spacing: 6) {
+                HStack(spacing: 6) {
+                    StatusPillView(status: task.status)
+                    PriorityPillView(priority: task.priority)
+                    if let dateText {
+                        DatePillView(dateText: dateText, isOverdue: task.isOverdue, isToday: task.dateUrgency == .today)
+                    }
+                    if task.hasUnsatisfiedBlockers {
+                        Label("Blocked", systemImage: "exclamationmark.octagon.fill")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .glassPill(tint: .red)
+                    }
+                    Spacer()
                 }
-                if task.hasUnsatisfiedBlockers {
-                    Label("Blocked", systemImage: "exclamationmark.octagon.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.red.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-                Spacer()
             }
         }
         .padding(16)

@@ -147,8 +147,7 @@ struct StatusPillView: View {
         .foregroundStyle(status.color)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(status.color.opacity(0.12))
-        .clipShape(Capsule())
+        .glassPill(tint: status.color)
     }
 }
 
@@ -165,8 +164,7 @@ struct PriorityPillView: View {
         .foregroundStyle(priority.color)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(priority.color.opacity(0.12))
-        .clipShape(Capsule())
+        .glassPill(tint: priority.color)
     }
 }
 
@@ -185,8 +183,7 @@ struct DatePillView: View {
         .foregroundStyle(color)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(color.opacity(0.12))
-        .clipShape(Capsule())
+        .glassPill(tint: color)
     }
 
     private var color: Color {
@@ -220,12 +217,7 @@ struct TagPillView: View {
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
-        )
-        .clipShape(Capsule())
+        .glassPill(tint: nil)
     }
 }
 
