@@ -1,0 +1,24 @@
+{
+  "name": "schedulebar",
+  "version": "0.1.0",
+  "description": "Capture explicit Codex 'record as task' requests into ScheduleBar.",
+  "author": {
+    "name": "ScheduleBar"
+  },
+  "license": "MIT",
+  "keywords": ["schedulebar", "tasks", "hooks", "mcp"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ScheduleBar",
+    "shortDescription": "Record Codex tasks into the local ScheduleBar app",
+    "longDescription": "ScheduleBar plugin ships lifecycle hooks and an MCP tool that appends explicit record-as-task events to a durable local queue. It does not modify user-level Codex hooks.",
+    "developerName": "ScheduleBar",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "defaultPrompt": [
+      "Record this as a task: file the weekly report on Friday."
+    ],
+    "brandColor": "#3F5D4A"
+  }
+}
