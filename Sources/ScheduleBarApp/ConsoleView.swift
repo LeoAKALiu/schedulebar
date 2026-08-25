@@ -521,11 +521,15 @@ private struct TaskRowView: View {
                 .strikethrough(isInactive)
                 .foregroundStyle(titleColor)
             Spacer(minLength: 8)
-            if task.priority == .high || task.priority == .critical {
-                PriorityPillView(priority: task.priority)
-            }
-            if let dateText {
-                DatePillView(dateText: dateText, isOverdue: task.isOverdue, isToday: task.dateUrgency == .today)
+            GlassGroup(spacing: 8) {
+                HStack(spacing: 8) {
+                    if task.priority == .high || task.priority == .critical {
+                        PriorityPillView(priority: task.priority)
+                    }
+                    if let dateText {
+                        DatePillView(dateText: dateText, isOverdue: task.isOverdue, isToday: task.dateUrgency == .today)
+                    }
+                }
             }
         }
         .padding(.vertical, 2)
@@ -832,9 +836,11 @@ private struct TaskDetailView: View {
     private var tagsSection: some View {
         Section("Tags") {
             if !task.tags.isEmpty {
-                FlowLayout(spacing: 6) {
-                    ForEach(task.tags, id: \.self) { tag in
-                        TagPillView(tag: tag)
+                GlassGroup(spacing: 6) {
+                    FlowLayout(spacing: 6) {
+                        ForEach(task.tags, id: \.self) { tag in
+                            TagPillView(tag: tag)
+                        }
                     }
                 }
             }

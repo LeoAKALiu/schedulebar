@@ -13,7 +13,10 @@ extension View {
     @ViewBuilder
     func glassPill(tint: Color?) -> some View {
         if #available(macOS 26.0, *) {
+            // glassEffect is proposal-friendly; pin it to the content's ideal
+            // size so pills inside List rows don't stretch or collapse.
             self.glassEffect(.regular.tint(tint), in: Capsule())
+                .fixedSize()
         } else if let tint {
             self
                 .background(tint.opacity(0.12))
