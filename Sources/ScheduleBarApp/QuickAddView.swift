@@ -56,12 +56,7 @@ struct QuickAddView: View {
                 }
             }
             .padding(14)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.secondary.opacity(0.15), lineWidth: 1)
-            )
+            .glassCard(cornerRadius: 10)
 
             // Info Tip
             HStack(alignment: .top, spacing: 8) {
@@ -85,8 +80,7 @@ struct QuickAddView: View {
                         .foregroundStyle(.red)
                 }
                 .padding(8)
-                .background(Color.red.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .glassErrorBanner(cornerRadius: 6)
             }
 
             // Footer Buttons
