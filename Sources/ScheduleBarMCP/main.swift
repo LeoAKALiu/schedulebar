@@ -460,45 +460,51 @@ private struct MCPStdio {
         return body
     }
 
+    /// Reads one JSON-RPC message. MCP's stdio transport is newline-delimited
+    /// JSON (one message per line); Content-Length header framing is also
+    /// accepted for compatibility with LSP-style clients.
     func readMessage(from handle: FileHandle) -> Data? {
-        var header = Data()
         let newline = Data("\n".utf8)
-        while true {
-            let byte = handle.readData(ofLength: 1)
-            if byte.isEmpty { return nil }
-            header.append(byte)
-            if header.count >= 4, header.suffix(4) == Data("\r\n\r\n".utf8) { break }
-            if header.count >= 2, header.suffix(2) == Data("\n\n".utf8) { break }
-            if header.count > 8192 { return nil }
-        }
-        let headerText = String(data: header, encoding: .utf8) ?? ""
-        var length = 0
-        for line in headerText.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
-            let parts = line.split(separator: ":", maxSplits: 1)
-            if parts.count == 2, parts[0].lowercased() == "content-length" {
-                length = Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        func readLine() -> Data? {
+            var line = Data()
+            while true {
+                let byte = handle.readData(ofLength: 1)
+                if byte.isEmpty { return line.isEmpty ? nil : line }
+                line.append(byte)
+                if byte == newline { break }
             }
+            return line
         }
-        if length > 0 {
-            return handle.readData(ofLength: length)
+
+        while let rawLine = readLine() {
+            let lineText = String(data: rawLine, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if lineText.isEmpty { continue }
+            if lineText.lowercased().hasPrefix("content-length:") {
+                var length = Int(lineText.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
+                while let headerLine = readLine() {
+                    let headerText = String(data: headerLine, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if headerText.isEmpty { break }
+                    if headerText.lowercased().hasPrefix("content-length:") {
+                        length = Int(headerText.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? length
+                    }
+                }
+                return length > 0 ? handle.readData(ofLength: length) : nil
+            }
+            return rawLine
         }
-        var json = Data()
-        while true {
-            let byte = handle.readData(ofLength: 1)
-            if byte.isEmpty { break }
-            json.append(byte)
-            if byte == newline { break }
-        }
-        return json.isEmpty ? nil : json
+        return nil
     }
 
+    /// Writes one JSON-RPC message as newline-delimited JSON, per the MCP
+    /// stdio transport.
     func write(response: [String: Any]) {
         guard JSONSerialization.isValidJSONObject(response),
               let data = try? JSONSerialization.data(withJSONObject: response, options: [])
         else { return }
-        let header = "Content-Length: \(data.count)\r\n\r\n"
-        FileHandle.standardOutput.write(Data(header.utf8))
         FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
     }
 }
 
